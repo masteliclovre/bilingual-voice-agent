@@ -1,0 +1,14 @@
+{
+  "name": "llm-agent",
+  "type": "module",
+  "scripts": {
+    "start": "node index.js",
+    "create-assistant": "node create-assistant.js"
+  },
+  "dependencies": {
+    "axios": "^1.7.2",
+    "dotenv": "^16.4.5",
+    "express": "^4.19.2",
+    "openai": "^4.52.0"
+  }
+}

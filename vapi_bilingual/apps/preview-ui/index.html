@@ -1,53 +1,230 @@
-<!DOCTYPE html>
-<html>
-    <head>
-        <meta charset="utf-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1">
-        <title>Preview UI</title>
-    </head>
-    <body>
-        <h2>Vapi Bilingual Preview</h2>
-        <label>System Prompt</label>
-        <textarea id="prompt" rows="6" cols="70" placeholder="Enter your prompt here..."></textarea>
-        <div>
-            Voice (11labs voiceId): <input id="voice" value="21m00Tcm4TlvDq8ikWAM">
+<!doctype html>
+<html lang="hr">
+  <head>
+    <meta charset="utf-8" />
+    <title>Vapi Bilingual Preview</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      :root { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+      body { margin: 24px; color: #111; }
+      h1 { margin: 0 0 16px; font-size: 20px; }
+      .grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+      label { font-size: 12px; color: #444; margin-bottom: 4px; display: inline-block; }
+      input, textarea, select { width: 100%; padding: 10px; border: 1px solid #ddd; border-radius: 8px; font-size: 14px; }
+      textarea { min-height: 120px; }
+      .card { border: 1px solid #eee; border-radius: 12px; padding: 16px; background: #fafafa; }
+      button { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-weight: 600; }
+      .primary { background: #111; color: #fff; }
+      .secondary { background: #e9ecef; color: #111; }
+      .danger { background: #ef4444; color: #fff; }
+      .muted { color: #555; font-size: 12px; }
+      #log { white-space: pre-wrap; background: #0b1020; color: #d1e9ff; padding: 12px; border-radius: 10px; min-height: 220px; max-height: 50vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      .row-buttons { display: flex; gap: 10px; align-items: center; }
+      .pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ddd; background: #fff; }
+      .ok { color: #059669; border-color: #059669; }
+      .bad { color: #dc2626; border-color: #dc2626; }
+    </style>
+  </head>
+  <body>
+    <h1>Vapi Bilingual Preview</h1>
+
+    <div class="grid">
+      <div class="card">
+        <div class="row">
+          <div style="flex:1">
+            <label>Vapi PUBLIC KEY</label>
+            <input id="publicKey" placeholder="pk_live_..." />
+          </div>
+          <div style="flex:1">
+            <label>Assistant ID</label>
+            <input id="assistantId" placeholder="asst_..." />
+          </div>
         </div>
-        <button id="start">Start</button>
-        <button id="stop">Stop</button>
-        <pre id="log"></pre>
 
-        <script type="module">
-            import Vapi from 'https://cdn.jsdelivr.net/npm/@vapi-ai/web/+esm';
-            const PUBLIC_KEY = 'YOUR_VAPI_PUBLIC_KEY';
-            const ASSISTANT_ID = 'YOUR_ASSISTANT_ID';
-            const vapi = new Vapi(PUBLIC_KEY);
-            const logEl = document.getElementById('log');
-            const log = (t) => logEl.textContent += t + '\n';
-            let tFinal;
+        <div class="row" style="margin-top:10px">
+          <div style="flex:1">
+            <label>Router WSS URL</label>
+            <input id="routerWss" placeholder="wss://<ngrok-id>.ngrok.io/router" />
+            <div class="muted">Točno onaj URL koji ti daje ngrok (wss) + <code>/router</code></div>
+          </div>
+          <div style="flex:1">
+            <label>Router Secret (opcionalno)</label>
+            <input id="routerSecret" placeholder="optional_vapi_secret" />
+          </div>
+        </div>
 
-            document.getElementById('start').onclick = () => {
-                const overrides = {
-                    model: {messages: [{role: 'system', content: document.getElementById('prompt').value}]},
-                    voice: {provider: 'elevenlabs', voiceId: document.getElementById('voice').value},
-                    transcriber: { provider: 'custom-transcriber', server: { url: 'wss://YOUR_DOMAIN/router' }, secret: 'optional_vapi_secret' }
-                };
-                vapi.start(ASSISTANT_ID, overrides);
-            };
-            document.getElementById('stop').onclick = () => vapi.stop(ASSISTANT_ID);
+        <div style="margin-top:10px">
+          <label>System prompt</label>
+          <textarea id="prompt" placeholder="Odgovaraj istim jezikom kao sugovornik (HR/EN)."></textarea>
+        </div>
 
-            vapi.on('message', (m) => {
-                if (m.type === 'transcript') {
-                    if (m.transcriptType === 'final') tFinal = performance.now();
-                    log(`${m.role}: ${m.transcript}`);
-                }
-                if (m.type === 'speech-update' && m.status === 'started' && tFinal) {
-                    const ttfb = Math.round(performance.now() - tFinal);
-                    log(`TTFB->speech: ${ttfb} ms`);
-                    tFinal = undefined;
-                    }
-                });
-                vapi.on('call-start', () => log('--- call started ---'));
-                vapi.on('call-end', () => log('--- call ended ---'));
-        </script>
-    </body>
+        <div class="row" style="margin-top:10px">
+          <div style="flex:1">
+            <label>ElevenLabs voiceId</label>
+            <input id="voiceId" value="21m00Tcm4TlvDq8ikWAM" />
+          </div>
+          <div style="flex:1">
+            <label>Auto-save postavke</label>
+            <select id="autosave">
+              <option value="on" selected>ON (spremi u localStorage)</option>
+              <option value="off">OFF (ne pamti)</option>
+            </select>
+          </div>
+        </div>
+
+        <div class="row-buttons" style="margin-top:14px">
+          <button id="start" class="primary">▶ Start</button>
+          <button id="stop" class="secondary">■ Stop</button>
+          <span id="status" class="pill">idle</span>
+          <span id="mic" class="pill">mic: ?</span>
+        </div>
+      </div>
+
+      <div class="card">
+        <label>Live log</label>
+        <div id="log"></div>
+      </div>
+    </div>
+
+    <script type="module">
+      import Vapi from 'https://esm.sh/@vapi-ai/web@^2.3.9';
+
+
+      // ---- helpers ----
+      const $ = (id) => document.getElementById(id);
+      const logEl = $('log');
+      const statusEl = $('status');
+      const micEl = $('mic');
+
+      const setStatus = (txt, ok=true) => {
+        statusEl.textContent = txt;
+        statusEl.className = 'pill ' + (ok ? 'ok' : 'bad');
+      };
+
+      const log = (msg) => {
+        const ts = new Date().toLocaleTimeString();
+        logEl.textContent += `[${ts}] ${msg}\n`;
+        logEl.scrollTop = logEl.scrollHeight;
+      };
+
+      // ---- local storage (autosave) ----
+      const LS_KEYS = ['publicKey','assistantId','routerWss','routerSecret','prompt','voiceId'];
+      const loadLS = () => {
+        try {
+          LS_KEYS.forEach(k => {
+            const v = localStorage.getItem('vapi_preview_'+k);
+            if (v !== null) $(k).value = v;
+          });
+        } catch {}
+      };
+      const saveLS = () => {
+        if ($('autosave').value !== 'on') return;
+        try {
+          LS_KEYS.forEach(k => localStorage.setItem('vapi_preview_'+k, $(k).value));
+        } catch {}
+      };
+      loadLS();
+
+      // ---- mic permission probe (best-effort) ----
+      (async () => {
+        try {
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+          stream.getTracks().forEach(t => t.stop());
+          micEl.textContent = 'mic: ok';
+          micEl.className = 'pill ok';
+        } catch {
+          micEl.textContent = 'mic: blocked';
+          micEl.className = 'pill bad';
+        }
+      })();
+
+      // ---- Vapi init (lazy on Start so možemo mijenjati Public Key u letu) ----
+      let vapi = null;
+
+      // latency timers
+      let lastFinalAt = null;
+
+      const onMessage = (m) => {
+        // Generic dump
+        // log(JSON.stringify(m));
+
+        if (m.type === 'transcript') {
+          const who = m.role || 'unknown';
+          const kind = m.transcriptType || 'partial';
+          log(`${who} (${kind}): ${m.transcript}`);
+          if (kind === 'final') lastFinalAt = performance.now();
+        }
+
+        if (m.type === 'speech-update') {
+          if (m.status === 'started' && lastFinalAt) {
+            const ttfb = Math.round(performance.now() - lastFinalAt);
+            log(`TTFB→speech: ${ttfb} ms`);
+            lastFinalAt = null;
+          }
+          if (m.status === 'stopped') {
+            // you can log durations here if needed
+          }
+        }
+
+        if (m.type === 'error') {
+          log(`ERR: ${m.error || 'unknown error'}`);
+          setStatus('error', false);
+        }
+      };
+
+      const attachHandlers = () => {
+        vapi.on('call-start', () => { log('--- call started ---'); setStatus('live', true); });
+        vapi.on('call-end',   () => { log('--- call ended ---');   setStatus('idle', true); });
+        vapi.on('message', onMessage);
+      };
+
+      $('start').onclick = async () => {
+        saveLS();
+        const PUBLIC_KEY   = $('publicKey').value.trim();
+        const ASSISTANT_ID = $('assistantId').value.trim();
+        const ROUTER_WSS   = $('routerWss').value.trim();
+        const SECRET       = $('routerSecret').value.trim();
+        const VOICE_ID     = $('voiceId').value.trim();
+        const PROMPT       = $('prompt').value;
+
+        if (!PUBLIC_KEY || !ASSISTANT_ID || !ROUTER_WSS) {
+          alert('Ispuni: PUBLIC KEY, ASSISTANT ID i Router WSS URL');
+          return;
+        }
+
+        // (re)create client if key changed
+        if (!vapi || vapi.publicKey !== PUBLIC_KEY) {
+          vapi = new Vapi(PUBLIC_KEY);
+          attachHandlers();
+        }
+
+        const overrides = {
+          model: { messages: [{ role: 'system', content: PROMPT }] },
+          voice: { provider: 'elevenlabs', voiceId: VOICE_ID },
+          transcriber: {
+            provider: 'custom-transcriber',
+            server: { url: ROUTER_WSS },
+            ...(SECRET ? { secret: SECRET } : {})
+          }
+        };
+
+        try {
+          await vapi.start(ASSISTANT_ID, overrides);
+          setStatus('connecting…', true);
+        } catch (e) {
+          log(`Start error: ${e?.message || e}`);
+          setStatus('error', false);
+        }
+      };
+
+      $('stop').onclick = async () => {
+        try {
+          await vapi?.stop();
+        } catch {}
+        setStatus('idle', true);
+        log('stop requested');
+      };
+    </script>
+  </body>
 </html>

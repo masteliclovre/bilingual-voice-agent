@@ -1,0 +1,30 @@
+version: '3.9'
+services:
+  router:
+    build: ./services/transcriber-router
+    ports: ["3001:3001"]
+    environment:
+    - DEEPGRAM_API_KEY=${DEEPGRAM_API_KEY}
+    - HR_STT_WSS=ws://hr-stt:8081/stream
+    - HR_CONFIDENCE_LOCK=0.75
+    - LANGLOCK_MS=2500
+    - SECRET=optional_vapi_secret
+    depends_on: [hr-stt]
+
+
+  hr-stt:
+    build: ./services/hr-stt
+    ports: ["8081:8081"]
+    environment:
+      - MODEL_PATH=/models/hr-whisper-ct2
+      - DEVICE=cuda
+      - COMPUTE_TYPE=float16
+      - VAD_FILTER=true
+      - CHUNK_SECONDS=1.0
+    volumes:
+      - ./models/whisper-large-v3-turbo-hr-parla-ctranslate2:/models/whisper-large-v3-turbo-hr-parla-ctranslate2:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - capabilities: [gpu]

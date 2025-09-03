@@ -45,7 +45,7 @@
         <div class="row" style="margin-top:10px">
           <div style="flex:1">
             <label>Router WSS URL</label>
-            <input id="routerWss" placeholder="wss://<ngrok-id>.ngrok.io/router" />
+            <input id="routerWss" placeholder="wss://&lt;ngrok-id&gt;.ngrok-free.app/router" />
             <div class="muted">Točno onaj URL koji ti daje ngrok (wss) + <code>/router</code></div>
           </div>
           <div style="flex:1">
@@ -88,8 +88,8 @@
     </div>
 
     <script type="module">
-      import Vapi from 'https://esm.sh/@vapi-ai/web@^2.3.9';
-
+      // ⬇️ ažuriran na zadnju verziju
+      import Vapi from 'https://esm.sh/@vapi-ai/web@^2.3.10';
 
       // ---- helpers ----
       const $ = (id) => document.getElementById(id);
@@ -139,16 +139,25 @@
         }
       })();
 
-      // ---- Vapi init (lazy on Start so možemo mijenjati Public Key u letu) ----
+      // ---- util: izvedi API base iz WSS router URL-a ----
+      const deriveApiBaseFromRouter = (routerWss) => {
+        try {
+          const u = new URL(routerWss);
+          const proto = (u.protocol === 'wss:') ? 'https:' : 'http:';
+          return `${proto}//${u.host}`;
+        } catch {
+          return null;
+        }
+      };
+
+      // ---- Vapi init (lazy na Start) ----
       let vapi = null;
+      let currentPublicKey = null; // ne oslanjamo se na vapi.publicKey
 
       // latency timers
       let lastFinalAt = null;
 
       const onMessage = (m) => {
-        // Generic dump
-        // log(JSON.stringify(m));
-
         if (m.type === 'transcript') {
           const who = m.role || 'unknown';
           const kind = m.transcriptType || 'partial';
@@ -162,9 +171,6 @@
             log(`TTFB→speech: ${ttfb} ms`);
             lastFinalAt = null;
           }
-          if (m.status === 'stopped') {
-            // you can log durations here if needed
-          }
         }
 
         if (m.type === 'error') {
@@ -177,6 +183,7 @@
         vapi.on('call-start', () => { log('--- call started ---'); setStatus('live', true); });
         vapi.on('call-end',   () => { log('--- call ended ---');   setStatus('idle', true); });
         vapi.on('message', onMessage);
+        vapi.on('error', (e) => { log(`SDK error: ${e?.message || e}`); setStatus('error', false); });
       };
 
       $('start').onclick = async () => {
@@ -193,15 +200,24 @@
           return;
         }
 
-        // (re)create client if key changed
-        if (!vapi || vapi.publicKey !== PUBLIC_KEY) {
-          vapi = new Vapi(PUBLIC_KEY);
+        const API_BASE = deriveApiBaseFromRouter(ROUTER_WSS);
+        if (!API_BASE) {
+          alert('Router WSS URL nije valjan. Primjer: wss://xxx.ngrok-free.app/router');
+          return;
+        }
+
+        // (re)create client ako se promijenio key ili još nismo instancirali
+        if (!vapi || currentPublicKey !== PUBLIC_KEY) {
+          // ⬇️ Ključno: usmjeravamo SDK na tvoj ngrok (umjesto produkcije)
+          vapi = new Vapi(PUBLIC_KEY, API_BASE);
+          currentPublicKey = PUBLIC_KEY;
           attachHandlers();
+          log(`Vapi init @ ${API_BASE}`);
         }
 
         const overrides = {
           model: { messages: [{ role: 'system', content: PROMPT }] },
-          voice: { provider: 'elevenlabs', voiceId: VOICE_ID },
+          voice: { provider: '11labs', voiceId: VOICE_ID }, // ⬅️ ispravan provider
           transcriber: {
             provider: 'custom-transcriber',
             server: { url: ROUTER_WSS },
@@ -210,8 +226,8 @@
         };
 
         try {
-          await vapi.start(ASSISTANT_ID, overrides);
           setStatus('connecting…', true);
+          await vapi.start(ASSISTANT_ID, overrides);
         } catch (e) {
           log(`Start error: ${e?.message || e}`);
           setStatus('error', false);

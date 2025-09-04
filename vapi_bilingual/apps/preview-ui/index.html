@@ -2,7 +2,7 @@
 <html lang="hr">
   <head>
     <meta charset="utf-8" />
-    <title>Vapi Bilingual Preview</title>
+    <title>Vapi Bilingual Preview (Debug)</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root { font-family: ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
@@ -17,9 +17,8 @@
       button { padding: 10px 14px; border: 0; border-radius: 10px; cursor: pointer; font-weight: 600; }
       .primary { background: #111; color: #fff; }
       .secondary { background: #e9ecef; color: #111; }
-      .danger { background: #ef4444; color: #fff; }
       .muted { color: #555; font-size: 12px; }
-      #log { white-space: pre-wrap; background: #0b1020; color: #d1e9ff; padding: 12px; border-radius: 10px; min-height: 220px; max-height: 50vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+      #log { white-space: pre-wrap; background: #0b1020; color: #d1e9ff; padding: 12px; border-radius: 10px; min-height: 280px; max-height: 65vh; overflow: auto; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
       .row-buttons { display: flex; gap: 10px; align-items: center; }
       .pill { padding: 2px 8px; border-radius: 999px; font-size: 12px; border: 1px solid #ddd; background: #fff; }
       .ok { color: #059669; border-color: #059669; }
@@ -27,7 +26,7 @@
     </style>
   </head>
   <body>
-    <h1>Vapi Bilingual Preview</h1>
+    <h1>Vapi Bilingual Preview (Debug)</h1>
 
     <div class="grid">
       <div class="card">
@@ -45,7 +44,7 @@
         <div class="row" style="margin-top:10px">
           <div style="flex:1">
             <label>Router WSS URL</label>
-            <input id="routerWss" placeholder="wss://&lt;ngrok-id&gt;.ngrok-free.app/router" />
+            <input id="routerWss" placeholder="wss://<ngrok-id>.ngrok-free.app/router" />
             <div class="muted">Točno onaj URL koji ti daje ngrok (wss) + <code>/router</code></div>
           </div>
           <div style="flex:1">
@@ -75,87 +74,123 @@
 
         <div class="row-buttons" style="margin-top:14px">
           <button id="start" class="primary">▶ Start</button>
-          <button id="stop" class="secondary">■ Stop</button>
+          <button id="stop"  class="secondary" disabled>■ Stop</button>
           <span id="status" class="pill">idle</span>
           <span id="mic" class="pill">mic: ?</span>
         </div>
       </div>
 
       <div class="card">
-        <label>Live log</label>
+        <label>Debug log</label>
         <div id="log"></div>
       </div>
     </div>
 
     <script type="module">
-      // ⬇️ ažuriran na zadnju verziju
-      import Vapi from 'https://esm.sh/@vapi-ai/web@^2.3.10';
+      import Vapi from 'https://esm.sh/@vapi-ai/web@^2.3.9';
 
-      // ---- helpers ----
+      // ---------- utils & debug helpers ----------
       const $ = (id) => document.getElementById(id);
       const logEl = $('log');
       const statusEl = $('status');
       const micEl = $('mic');
 
-      const setStatus = (txt, ok=true) => {
-        statusEl.textContent = txt;
-        statusEl.className = 'pill ' + (ok ? 'ok' : 'bad');
+      const now = () => new Date().toLocaleTimeString();
+      const log = (msg) => { logEl.textContent += `[${now()}] ${msg}\n`; logEl.scrollTop = logEl.scrollHeight; };
+      const setStatus = (txt, ok=true) => { statusEl.textContent = txt; statusEl.className = 'pill ' + (ok ? 'ok' : 'bad'); };
+
+      const redact = (k, v) => {
+        const key = (k || '').toLowerCase();
+        if (['secret','apikey','api_key','token','authorization','auth','key'].some(s => key.includes(s))) return '***';
+        if (typeof v === 'string' && v.startsWith('sk_')) return '***';
+        return v;
+      };
+      const safeStringify = (obj) => {
+        try { return JSON.stringify(obj, redact, 2); } catch { try { return JSON.stringify(obj); } catch { return String(obj); } }
       };
 
-      const log = (msg) => {
-        const ts = new Date().toLocaleTimeString();
-        logEl.textContent += `[${ts}] ${msg}\n`;
-        logEl.scrollTop = logEl.scrollHeight;
-      };
+      // ---------- environment banner ----------
+      log(`UA: ${navigator.userAgent}`);
+      log(`Page: ${location.href}`);
+      log('Preview loaded.');
 
-      // ---- local storage (autosave) ----
+      // ---------- capture unhandled errors ----------
+      window.addEventListener('error', (e) => log(`window.error: ${e.message}`));
+      window.addEventListener('unhandledrejection', (e) => log(`unhandledrejection: ${e.reason?.message || e.reason}`));
+      document.addEventListener('visibilitychange', () => log(`visibility: ${document.visibilityState}`));
+      window.addEventListener('beforeunload', () => log('beforeunload'));
+
+      // ---------- WebRTC debug (peer connection states) ----------
+      (function wrapRTCPeerConnection(){
+        const Orig = window.RTCPeerConnection;
+        if (!Orig) return;
+        window.RTCPeerConnection = function(...args){
+          const pc = new Orig(...args);
+          const id = Math.random().toString(36).slice(2,8);
+          const dump = () => log(`pc[${id}] states: connection=${pc.connectionState} ice=${pc.iceConnectionState} signaling=${pc.signalingState}`);
+          pc.addEventListener('connectionstatechange', dump);
+          pc.addEventListener('iceconnectionstatechange', dump);
+          pc.addEventListener('signalingstatechange', dump);
+          return pc;
+        };
+      })();
+
+      // ---------- localStorage ----------
       const LS_KEYS = ['publicKey','assistantId','routerWss','routerSecret','prompt','voiceId'];
-      const loadLS = () => {
-        try {
-          LS_KEYS.forEach(k => {
-            const v = localStorage.getItem('vapi_preview_'+k);
-            if (v !== null) $(k).value = v;
-          });
-        } catch {}
-      };
-      const saveLS = () => {
-        if ($('autosave').value !== 'on') return;
-        try {
-          LS_KEYS.forEach(k => localStorage.setItem('vapi_preview_'+k, $(k).value));
-        } catch {}
-      };
+      const loadLS = () => { try { LS_KEYS.forEach(k => { const v = localStorage.getItem('vapi_preview_'+k); if (v !== null) $(k).value = v; }); } catch {} };
+      const saveLS = () => { if ($('autosave').value !== 'on') return; try { LS_KEYS.forEach(k => localStorage.setItem('vapi_preview_'+k, $(k).value)); } catch {} };
       loadLS();
 
-      // ---- mic permission probe (best-effort) ----
+      // ---------- mic/device quick probe ----------
       (async () => {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-          stream.getTracks().forEach(t => t.stop());
-          micEl.textContent = 'mic: ok';
-          micEl.className = 'pill ok';
-        } catch {
-          micEl.textContent = 'mic: blocked';
-          micEl.className = 'pill bad';
+          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
+          s.getTracks().forEach(t => t.stop());
+          micEl.textContent='mic: ok'; micEl.className='pill ok';
+          const devices = await navigator.mediaDevices.enumerateDevices();
+          const mics = devices.filter(d => d.kind === 'audioinput').map(d => d.label || '(no label)');
+          log(`mics: ${mics.join(' | ') || '(none)'}`);
+        } catch (e) {
+          micEl.textContent='mic: blocked'; micEl.className='pill bad';
+          log(`mic error: ${e?.message || e}`);
         }
       })();
 
-      // ---- util: izvedi API base iz WSS router URL-a ----
-      const deriveApiBaseFromRouter = (routerWss) => {
-        try {
-          const u = new URL(routerWss);
-          const proto = (u.protocol === 'wss:') ? 'https:' : 'http:';
-          return `${proto}//${u.host}`;
-        } catch {
-          return null;
+      // ---------- fetch logger for /call/web ----------
+      const _fetch = window.fetch.bind(window);
+      window.fetch = async (input, init = {}) => {
+        const url = typeof input === 'string' ? input : input?.url;
+        const isVapi = url && url.includes('/call/web');
+        if (isVapi) {
+          try {
+            const method = (init.method || (typeof input !== 'string' ? input.method : 'POST') || 'POST').toUpperCase();
+            let bodyText = '';
+            if (init.body) {
+              try { bodyText = typeof init.body === 'string' ? init.body : await (init.body?.text?.() ?? Promise.resolve('')); } catch {}
+            } else if (typeof input !== 'string') {
+              try { bodyText = await input.clone().text(); } catch {}
+            }
+            let parsed = null;
+            try { parsed = JSON.parse(bodyText); } catch {}
+            log(`FETCH → ${method} ${url}`);
+            if (parsed) log('FETCH body (sanitized): ' + safeStringify(parsed));
+          } catch (e) { log('FETCH pre-log error: ' + (e?.message || e)); }
         }
+        const res = await _fetch(input, init);
+        if (isVapi) {
+          let text=''; try { text = await res.clone().text(); } catch {}
+          log(`FETCH ← ${res.status} ${res.statusText} ${url}`);
+          if (!res.ok) log(`FETCH error body: ${text || '(no body)'}`);
+        }
+        return res;
       };
 
-      // ---- Vapi init (lazy na Start) ----
-      let vapi = null;
-      let currentPublicKey = null; // ne oslanjamo se na vapi.publicKey
-
-      // latency timers
+      // ---------- Vapi client (single instance) ----------
+      let vapi = null, currentPublicKey = null, inCall = false, handlersAttached = false;
       let lastFinalAt = null;
+
+      const toggleButtons = () => { $('start').disabled = inCall; $('stop').disabled = !inCall; };
+      toggleButtons();
 
       const onMessage = (m) => {
         if (m.type === 'transcript') {
@@ -163,31 +198,35 @@
           const kind = m.transcriptType || 'partial';
           log(`${who} (${kind}): ${m.transcript}`);
           if (kind === 'final') lastFinalAt = performance.now();
-        }
-
-        if (m.type === 'speech-update') {
+        } else if (m.type === 'speech-update') {
           if (m.status === 'started' && lastFinalAt) {
-            const ttfb = Math.round(performance.now() - lastFinalAt);
-            log(`TTFB→speech: ${ttfb} ms`);
+            log(`TTFB→speech: ${Math.round(performance.now() - lastFinalAt)} ms`);
             lastFinalAt = null;
           }
-        }
-
-        if (m.type === 'error') {
-          log(`ERR: ${m.error || 'unknown error'}`);
+        } else if (m.type === 'error') {
+          log(`SDK message error: ${safeStringify(m)}`);
           setStatus('error', false);
+        } else {
+          log(`MSG: ${safeStringify(m)}`);
         }
       };
 
       const attachHandlers = () => {
-        vapi.on('call-start', () => { log('--- call started ---'); setStatus('live', true); });
-        vapi.on('call-end',   () => { log('--- call ended ---');   setStatus('idle', true); });
+        if (handlersAttached) return;
+        handlersAttached = true;
+        vapi.on('call-start', () => { log('--- call started ---'); setStatus('live', true); inCall = true; toggleButtons(); });
+        vapi.on('call-end',   () => { log('--- call ended ---');   setStatus('idle', true); inCall = false; toggleButtons(); });
         vapi.on('message', onMessage);
-        vapi.on('error', (e) => { log(`SDK error: ${e?.message || e}`); setStatus('error', false); });
+        vapi.on('error', (e) => { log(`SDK error: ${safeStringify(e)}`); setStatus('error', false); });
+        // If SDK exposes additional events in your version, uncomment:
+        // vapi.on('connection-state', (s) => log(`CONN: ${safeStringify(s)}`));
+        // vapi.on('meeting-event',   (ev) => log(`MEETING: ${safeStringify(ev)}`));
       };
 
       $('start').onclick = async () => {
+        if (inCall) { log('start ignored: already in call'); return; }
         saveLS();
+
         const PUBLIC_KEY   = $('publicKey').value.trim();
         const ASSISTANT_ID = $('assistantId').value.trim();
         const ROUTER_WSS   = $('routerWss').value.trim();
@@ -200,24 +239,25 @@
           return;
         }
 
-        const API_BASE = deriveApiBaseFromRouter(ROUTER_WSS);
-        if (!API_BASE) {
-          alert('Router WSS URL nije valjan. Primjer: wss://xxx.ngrok-free.app/router');
-          return;
-        }
-
-        // (re)create client ako se promijenio key ili još nismo instancirali
         if (!vapi || currentPublicKey !== PUBLIC_KEY) {
-          // ⬇️ Ključno: usmjeravamo SDK na tvoj ngrok (umjesto produkcije)
-          vapi = new Vapi(PUBLIC_KEY, API_BASE);
+          vapi = new Vapi(PUBLIC_KEY);
           currentPublicKey = PUBLIC_KEY;
           attachHandlers();
-          log(`Vapi init @ ${API_BASE}`);
+          log('Vapi init');
         }
 
+        try { await vapi.stop(); } catch {}
+
         const overrides = {
-          model: { messages: [{ role: 'system', content: PROMPT }] },
-          voice: { provider: '11labs', voiceId: VOICE_ID }, // ⬅️ ispravan provider
+          model: {
+            provider: 'openai',
+            model: 'gpt-4o-mini',
+            messages: [{ role: 'system', content: PROMPT }]
+          },
+          voice: { 
+            provider: 'vapi',
+            voiceId: "Elliot"
+          },
           transcriber: {
             provider: 'custom-transcriber',
             server: { url: ROUTER_WSS },
@@ -225,21 +265,24 @@
           }
         };
 
+        log('ASSISTANT_ID: ' + ASSISTANT_ID);
+        log('Overrides (sanitized): ' + safeStringify(overrides));
+
         try {
           setStatus('connecting…', true);
+          toggleButtons();
           await vapi.start(ASSISTANT_ID, overrides);
         } catch (e) {
           log(`Start error: ${e?.message || e}`);
           setStatus('error', false);
+          inCall = false;
+          toggleButtons();
         }
       };
 
       $('stop').onclick = async () => {
-        try {
-          await vapi?.stop();
-        } catch {}
-        setStatus('idle', true);
-        log('stop requested');
+        try { await vapi?.stop(); } catch {}
+        // flags reset in call-end
       };
     </script>
   </body>

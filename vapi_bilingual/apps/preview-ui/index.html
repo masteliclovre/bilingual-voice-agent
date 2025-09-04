@@ -60,15 +60,17 @@
 
         <div class="row" style="margin-top:10px">
           <div style="flex:1">
-            <label>ElevenLabs voiceId</label>
-            <input id="voiceId" value="21m00Tcm4TlvDq8ikWAM" />
+            <label>Voice provider</label>
+            <select id="voiceProvider">
+              <option value="vapi" selected>vapi (built-in)</option>
+              <option value="11labs">11labs (requires API key)</option>
+              <option value="openai">openai (alloy)</option>
+            </select>
           </div>
           <div style="flex:1">
-            <label>Auto-save postavke</label>
-            <select id="autosave">
-              <option value="on" selected>ON (spremi u localStorage)</option>
-              <option value="off">OFF (ne pamti)</option>
-            </select>
+            <label>Voice ID / name</label>
+            <input id="voiceId" value="Elliot" />
+            <div class="muted" id="voiceHint">For vapi use one of: Elliot, Kylie, Rohan, Lily, Savannah, Hana, Neha, Cole, Harry, Paige, Spencer</div>
           </div>
         </div>
 
@@ -94,20 +96,11 @@
       const logEl = $('log');
       const statusEl = $('status');
       const micEl = $('mic');
-
       const now = () => new Date().toLocaleTimeString();
       const log = (msg) => { logEl.textContent += `[${now()}] ${msg}\n`; logEl.scrollTop = logEl.scrollHeight; };
       const setStatus = (txt, ok=true) => { statusEl.textContent = txt; statusEl.className = 'pill ' + (ok ? 'ok' : 'bad'); };
-
-      const redact = (k, v) => {
-        const key = (k || '').toLowerCase();
-        if (['secret','apikey','api_key','token','authorization','auth','key'].some(s => key.includes(s))) return '***';
-        if (typeof v === 'string' && v.startsWith('sk_')) return '***';
-        return v;
-      };
-      const safeStringify = (obj) => {
-        try { return JSON.stringify(obj, redact, 2); } catch { try { return JSON.stringify(obj); } catch { return String(obj); } }
-      };
+      const redact = (k, v) => { const key=(k||'').toLowerCase(); if(['secret','apikey','api_key','token','authorization','auth','key'].some(s=>key.includes(s))) return '***'; if(typeof v==='string' && v.startsWith('sk_')) return '***'; return v; };
+      const safeStringify = (obj) => { try { return JSON.stringify(obj, redact, 2); } catch { try { return JSON.stringify(obj); } catch { return String(obj); } } };
 
       // ---------- environment banner ----------
       log(`UA: ${navigator.userAgent}`);
@@ -120,7 +113,7 @@
       document.addEventListener('visibilitychange', () => log(`visibility: ${document.visibilityState}`));
       window.addEventListener('beforeunload', () => log('beforeunload'));
 
-      // ---------- WebRTC debug (peer connection states) ----------
+      // ---------- WebRTC debug ----------
       (function wrapRTCPeerConnection(){
         const Orig = window.RTCPeerConnection;
         if (!Orig) return;
@@ -136,24 +129,16 @@
       })();
 
       // ---------- localStorage ----------
-      const LS_KEYS = ['publicKey','assistantId','routerWss','routerSecret','prompt','voiceId'];
+      const LS_KEYS = ['publicKey','assistantId','routerWss','routerSecret','prompt','voiceId','voiceProvider'];
       const loadLS = () => { try { LS_KEYS.forEach(k => { const v = localStorage.getItem('vapi_preview_'+k); if (v !== null) $(k).value = v; }); } catch {} };
-      const saveLS = () => { if ($('autosave').value !== 'on') return; try { LS_KEYS.forEach(k => localStorage.setItem('vapi_preview_'+k, $(k).value)); } catch {} };
+      const saveLS = () => { if ($('autosave')?.value !== 'on') return; try { LS_KEYS.forEach(k => localStorage.setItem('vapi_preview_'+k, $(k).value)); } catch {} };
       loadLS();
 
       // ---------- mic/device quick probe ----------
       (async () => {
-        try {
-          const s = await navigator.mediaDevices.getUserMedia({ audio: true });
-          s.getTracks().forEach(t => t.stop());
-          micEl.textContent='mic: ok'; micEl.className='pill ok';
-          const devices = await navigator.mediaDevices.enumerateDevices();
-          const mics = devices.filter(d => d.kind === 'audioinput').map(d => d.label || '(no label)');
-          log(`mics: ${mics.join(' | ') || '(none)'}`);
-        } catch (e) {
-          micEl.textContent='mic: blocked'; micEl.className='pill bad';
-          log(`mic error: ${e?.message || e}`);
-        }
+        try { const s = await navigator.mediaDevices.getUserMedia({ audio: true }); s.getTracks().forEach(t => t.stop()); micEl.textContent='mic: ok'; micEl.className='pill ok';
+          const devices = await navigator.mediaDevices.enumerateDevices(); const mics = devices.filter(d => d.kind === 'audioinput').map(d => d.label || '(no label)'); log(`mics: ${mics.join(' | ') || '(none)'}`);
+        } catch (e) { micEl.textContent='mic: blocked'; micEl.className='pill bad'; log(`mic error: ${e?.message || e}`); }
       })();
 
       // ---------- fetch logger for /call/web ----------
@@ -164,30 +149,21 @@
         if (isVapi) {
           try {
             const method = (init.method || (typeof input !== 'string' ? input.method : 'POST') || 'POST').toUpperCase();
-            let bodyText = '';
-            if (init.body) {
-              try { bodyText = typeof init.body === 'string' ? init.body : await (init.body?.text?.() ?? Promise.resolve('')); } catch {}
-            } else if (typeof input !== 'string') {
-              try { bodyText = await input.clone().text(); } catch {}
-            }
-            let parsed = null;
-            try { parsed = JSON.parse(bodyText); } catch {}
-            log(`FETCH → ${method} ${url}`);
-            if (parsed) log('FETCH body (sanitized): ' + safeStringify(parsed));
+            let bodyText = ''; if (init.body) { try { bodyText = typeof init.body === 'string' ? init.body : await (init.body?.text?.() ?? Promise.resolve('')); } catch {} } else if (typeof input !== 'string') { try { bodyText = await input.clone().text(); } catch {} }
+            let parsed = null; try { parsed = JSON.parse(bodyText); } catch {}
+            log(`FETCH → ${method} ${url}`); if (parsed) log('FETCH body (sanitized): ' + safeStringify(parsed));
           } catch (e) { log('FETCH pre-log error: ' + (e?.message || e)); }
         }
         const res = await _fetch(input, init);
-        if (isVapi) {
-          let text=''; try { text = await res.clone().text(); } catch {}
-          log(`FETCH ← ${res.status} ${res.statusText} ${url}`);
-          if (!res.ok) log(`FETCH error body: ${text || '(no body)'}`);
-        }
+        if (isVapi) { let text=''; try { text = await res.clone().text(); } catch {} log(`FETCH ← ${res.status} ${res.statusText} ${url}`); if (!res.ok) log(`FETCH error body: ${text || '(no body)'}`); }
         return res;
       };
 
       // ---------- Vapi client (single instance) ----------
       let vapi = null, currentPublicKey = null, inCall = false, handlersAttached = false;
       let lastFinalAt = null;
+
+      const vapiVoices = ['Elliot','Kylie','Rohan','Lily','Savannah','Hana','Neha','Cole','Harry','Paige','Spencer'];
 
       const toggleButtons = () => { $('start').disabled = inCall; $('stop').disabled = !inCall; };
       toggleButtons();
@@ -199,10 +175,9 @@
           log(`${who} (${kind}): ${m.transcript}`);
           if (kind === 'final') lastFinalAt = performance.now();
         } else if (m.type === 'speech-update') {
-          if (m.status === 'started' && lastFinalAt) {
-            log(`TTFB→speech: ${Math.round(performance.now() - lastFinalAt)} ms`);
-            lastFinalAt = null;
-          }
+          if (m.status === 'started' && lastFinalAt) { log(`TTFB→speech: ${Math.round(performance.now() - lastFinalAt)} ms`); lastFinalAt = null; }
+        } else if (m.type === 'status-update' && m.status === 'ended') {
+          log(`PIPELINE ENDED: reason=${m.endedReason || '(n/a)'}`);
         } else if (m.type === 'error') {
           log(`SDK message error: ${safeStringify(m)}`);
           setStatus('error', false);
@@ -218,20 +193,38 @@
         vapi.on('call-end',   () => { log('--- call ended ---');   setStatus('idle', true); inCall = false; toggleButtons(); });
         vapi.on('message', onMessage);
         vapi.on('error', (e) => { log(`SDK error: ${safeStringify(e)}`); setStatus('error', false); });
-        // If SDK exposes additional events in your version, uncomment:
-        // vapi.on('connection-state', (s) => log(`CONN: ${safeStringify(s)}`));
-        // vapi.on('meeting-event',   (ev) => log(`MEETING: ${safeStringify(ev)}`));
       };
+
+      // keep helper texts in sync with provider
+      const voiceProviderEl = $('voiceProvider');
+      const voiceIdEl = $('voiceId');
+      const voiceHintEl = $('voiceHint');
+      const refreshVoiceHint = () => {
+        const p = voiceProviderEl.value;
+        if (p === 'vapi') {
+          voiceHintEl.textContent = `For vapi use one of: ${vapiVoices.join(', ')}`;
+          if (!vapiVoices.includes(voiceIdEl.value)) voiceIdEl.value = 'Elliot';
+        } else if (p === 'openai') {
+          voiceHintEl.textContent = 'For openai, try: alloy';
+          if (!voiceIdEl.value) voiceIdEl.value = 'alloy';
+        } else {
+          voiceHintEl.textContent = 'For 11labs, paste your ElevenLabs voiceId (uuid).';
+          if (voiceIdEl.value === 'Elliot' || voiceIdEl.value === 'alloy') voiceIdEl.value = '';
+        }
+      };
+      voiceProviderEl.addEventListener('change', () => { localStorage.setItem('vapi_preview_voiceProvider', voiceProviderEl.value); refreshVoiceHint(); });
+      refreshVoiceHint();
 
       $('start').onclick = async () => {
         if (inCall) { log('start ignored: already in call'); return; }
-        saveLS();
+        try { saveLS(); } catch {}
 
         const PUBLIC_KEY   = $('publicKey').value.trim();
         const ASSISTANT_ID = $('assistantId').value.trim();
         const ROUTER_WSS   = $('routerWss').value.trim();
         const SECRET       = $('routerSecret').value.trim();
-        const VOICE_ID     = $('voiceId').value.trim();
+        const VOICE_ID_RAW = $('voiceId').value.trim();
+        const PROVIDER     = $('voiceProvider').value;
         const PROMPT       = $('prompt').value;
 
         if (!PUBLIC_KEY || !ASSISTANT_ID || !ROUTER_WSS) {
@@ -248,16 +241,24 @@
 
         try { await vapi.stop(); } catch {}
 
+        // Build a compliant voice block
+        let voice;
+        if (PROVIDER === 'vapi') {
+          const vid = vapiVoices.includes(VOICE_ID_RAW) ? VOICE_ID_RAW : 'Elliot';
+          voice = { provider: 'vapi', voiceId: vid };
+        } else if (PROVIDER === 'openai') {
+          voice = { provider: 'openai', voiceId: VOICE_ID_RAW || 'alloy' };
+        } else {
+          voice = { provider: '11labs', voiceId: VOICE_ID_RAW }; // must be a valid 11labs id and you need the provider key added in Vapi
+        }
+
         const overrides = {
           model: {
             provider: 'openai',
             model: 'gpt-4o-mini',
             messages: [{ role: 'system', content: PROMPT }]
           },
-          voice: { 
-            provider: 'vapi',
-            voiceId: "Elliot"
-          },
+          voice,
           transcriber: {
             provider: 'custom-transcriber',
             server: { url: ROUTER_WSS },
@@ -270,20 +271,20 @@
 
         try {
           setStatus('connecting…', true);
-          toggleButtons();
+          $('start').disabled = true;
+          $('stop').disabled = false;
           await vapi.start(ASSISTANT_ID, overrides);
         } catch (e) {
           log(`Start error: ${e?.message || e}`);
           setStatus('error', false);
           inCall = false;
-          toggleButtons();
+          $('start').disabled = false;
+          $('stop').disabled = true;
         }
       };
 
-      $('stop').onclick = async () => {
-        try { await vapi?.stop(); } catch {}
-        // flags reset in call-end
-      };
+      $('stop').onclick = async () => { try { await vapi?.stop(); } catch {} };
+
     </script>
   </body>
 </html>

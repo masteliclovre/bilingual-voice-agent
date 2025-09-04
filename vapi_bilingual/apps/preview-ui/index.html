@@ -253,18 +253,37 @@
         }
 
         const overrides = {
-          model: {
-            provider: 'openai',
-            model: 'gpt-4o-mini',
-            messages: [{ role: 'system', content: PROMPT }]
-          },
-          voice,
-          transcriber: {
-            provider: 'custom-transcriber',
-            server: { url: ROUTER_WSS },
-            ...(SECRET ? { secret: SECRET } : {})
-          }
+            model: {
+                provider: 'openai',
+                model: 'gpt-4o-mini',
+                messages: [{ role: 'system', content: PROMPT }]
+            },
+            voice: {
+                provider: 'vapi',
+                voiceId: 'Elliot'
+            },
+            transcriber: {
+                provider: 'custom-transcriber',
+                server: { url: ROUTER_WSS },
+                ...(SECRET ? { secret: SECRET } : {})
+            },
+
+            // 👇 NEW: prevent early hangups + start the convo proactively
+            silenceTimeoutSeconds: 180,                 // try 120–300
+            firstMessageMode: 'assistant-speaks-first', // agent opens
+            firstMessage: 'Bok! Kako mogu pomoći? (Možeš pričati hrvatski ili engleski.)',
+
+            // 👇 OPTIONAL: nudge during long pauses instead of ending
+            messagePlan: {
+                idleMessages: [
+                'Još sam tu — želiš nastaviti?',
+                'Ako želiš, mogu odmah krenuti s rezervacijom.'
+                ],
+                idleTimeoutSeconds: 15,         // prompt again after 15s of silence
+                idleMessageMaxSpokenCount: 2
+            }
         };
+
 
         log('ASSISTANT_ID: ' + ASSISTANT_ID);
         log('Overrides (sanitized): ' + safeStringify(overrides));

@@ -263,9 +263,12 @@
                 voiceId: 'Elliot'
             },
             transcriber: {
-                provider: 'custom-transcriber',
+                provider: "deepgram",
+                model: "nova-2",
+                language: "multi"
+                /*provider: 'custom-transcriber',
                 server: { url: ROUTER_WSS },
-                ...(SECRET ? { secret: SECRET } : {})
+                ...(SECRET ? { secret: SECRET } : {})*/
             },
 
             // 👇 NEW: prevent early hangups + start the convo proactively

@@ -1,0 +1,9 @@
+faster-whisper
+sounddevice
+scipy
+pydub
+numpy
+python-dotenv
+openai
+elevenlabs
+webrtcvad-wheels ; sys_platform == "win32"

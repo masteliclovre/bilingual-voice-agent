@@ -13,7 +13,7 @@ from scipy.signal import resample
 SERVER_URL = os.getenv("SERVER_URL", "http://localhost:8765/transcribe_and_reply")
 
 # ElevenLabs
-ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "sk_561da61d6ed926118a030c615069707fc998f525e8bff7c3")
+
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vFQACl5nAIV0owAavYxE")
 ELEVENLABS_MODEL_ID = os.getenv("ELEVENLABS_MODEL_ID", "eleven_multilingual_v2")
 

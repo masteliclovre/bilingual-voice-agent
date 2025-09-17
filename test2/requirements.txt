@@ -7,3 +7,8 @@ python-dotenv
 openai
 elevenlabs
 webrtcvad-wheels ; sys_platform == "win32"
+pyttsx3
+
+fastapi
+uvicorn[standard]
+python-multipart

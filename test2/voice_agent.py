@@ -16,6 +16,7 @@ import time
 import wave
 import threading
 import queue
+from typing import Optional
 import numpy as np
 import sounddevice as sd
 from dotenv import load_dotenv
@@ -284,7 +285,7 @@ def tts_elevenlabs_stream_to_output(el: ElevenLabs, text: str, out: OutputAudio)
     if not got_audio:
         raise RuntimeError("ElevenLabs returned empty audio")
 
-def _select_offline_voice(engine, lang_hint: str | None):
+def _select_offline_voice(engine, lang_hint: Optional[str]):
     """
     Try to pick a voice matching language hints (Croatian vs English).
     Fallback to engine default if no match.
@@ -322,7 +323,7 @@ def _select_offline_voice(engine, lang_hint: str | None):
         return voices[0].id
     return None
 
-def tts_offline_pyttsx3(text: str, lang_hint: str | None):
+def tts_offline_pyttsx3(text: str, lang_hint: Optional[str]):
     """
     Offline TTS using pyttsx3 (SAPI5 on Windows, NSSpeech on macOS, eSpeak on Linux).
     Note: Actual Croatian voice availability depends on installed system voices.
@@ -344,7 +345,7 @@ def tts_offline_pyttsx3(text: str, lang_hint: str | None):
     except Exception as e:
         print("Offline TTS error:", e)
 
-def say_sentence_with_fallback(el: ElevenLabs | None, out: OutputAudio, text: str, lang_hint: str | None):
+def say_sentence_with_fallback(el: Optional[ElevenLabs], out: OutputAudio, text: str, lang_hint: Optional[str]):
     """
     Speak a single sentence. Try ElevenLabs; on failure, use pyttsx3.
     Never raise to the main loop.
@@ -418,7 +419,7 @@ class Memory:
         except Exception as e:
             print("Memory summarize error:", e)
 
-    def build_prompt(self, user_lang_hint: str | None):
+    def build_prompt(self, user_lang_hint: Optional[str]):
         system = (
             "You are a concise, helpful bilingual assistant for Croatian and English. "
             "Detect the user's language (Croatian or English) and ALWAYS reply in that language. "

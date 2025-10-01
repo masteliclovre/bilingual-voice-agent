@@ -14,5 +14,6 @@ assistant. The `test2` directory includes:
 - `realtime_client.py` – a streaming microphone client that speaks to the proxy and forwards the
   assistant reply to ElevenLabs for playback.
 
+
 If you plan to serve users over the internet, read the networking guide for advice on avoiding
 bandwidth bottlenecks and deploying the ASR server to the cloud: [`docs/networking.md`](docs/networking.md).

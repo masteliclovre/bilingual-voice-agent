@@ -70,6 +70,7 @@ Your friend is correct that removing unnecessary hops can improve latency. In pr
 3. Update the client loop so that it awaits streaming transcripts/replies from OpenAI and forwards
    them to ElevenLabs (or another TTS).
 
+
 See `test2/realtime_client.py` for a working implementation that replaces the HTTP upload with a
 WebSocket session against OpenAI's Realtime API.
 

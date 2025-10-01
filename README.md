@@ -9,6 +9,11 @@ assistant. The `test2` directory includes:
   automatic speech recognition (ASR) server.
 - `server_asr.py` – a FastAPI service that exposes Faster-Whisper transcription for use by remote
   clients.
+- `realtime_proxy.py` – a WebSocket bridge that hides your OpenAI API key while relaying audio to
+  the Realtime API.
+- `realtime_client.py` – a streaming microphone client that speaks to the proxy and forwards the
+  assistant reply to ElevenLabs for playback.
+
 
 If you plan to serve users over the internet, read the networking guide for advice on avoiding
 bandwidth bottlenecks and deploying the ASR server to the cloud: [`docs/networking.md`](docs/networking.md).

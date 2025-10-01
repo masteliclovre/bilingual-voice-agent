@@ -70,9 +70,45 @@ Your friend is correct that removing unnecessary hops can improve latency. In pr
 3. Update the client loop so that it awaits streaming transcripts/replies from OpenAI and forwards
    them to ElevenLabs (or another TTS).
 
-The repository does not include this direct-streaming client yet, but the existing architecture makes
-it straightforward to experiment. Start from `test2/client_mic.py`, replace the `requests.post`
-call with an OpenAI streaming session, and feed the captured PCM frames into the socket.
+
+See `test2/realtime_client.py` for a working implementation that replaces the HTTP upload with a
+WebSocket session against OpenAI's Realtime API.
+
+## Streaming directly to OpenAI – step by step
+
+The new `test2/realtime_proxy.py` and `test2/realtime_client.py` give you an end-to-end example of
+how to stream microphone audio to OpenAI without relaying through the Faster-Whisper server.
+
+1. **Install dependencies** – ensure your virtual environment includes the extra `websockets`
+   dependency:
+   ```bash
+   pip install -r test2/requirements.txt
+   ```
+2. **Launch the proxy (on a trusted machine)** – this process stores the OpenAI API key and opens a
+   WebSocket endpoint that clients can hit without seeing the credential:
+   ```bash
+   export OPENAI_API_KEY="sk-..."
+   export OPENAI_REALTIME_MODEL="gpt-4o-realtime-preview-2024-12-17"  # optional override
+   python test2/realtime_proxy.py
+   ```
+   By default it listens on `0.0.0.0:8081`. Use a reverse proxy or VPN if you need to expose it on
+   the public internet.
+3. **Configure your client machine** – no OpenAI secrets are required on the client. Provide only
+   the proxy URL (and your ElevenLabs key if you want audio playback):
+   ```bash
+   export REALTIME_PROXY_URL="ws://your-proxy-host:8081"
+   export ELEVENLABS_API_KEY="el-..."  # optional but recommended
+   python test2/realtime_client.py
+   ```
+4. **Talk to the assistant** – the client captures 20 ms PCM frames, streams them to the proxy as
+   they are recorded, waits for the Realtime API to return streaming transcripts, and forwards the
+   final reply to ElevenLabs for TTS playback.
+5. **Customise behaviour** – adjust `ASSISTANT_INSTRUCTIONS`, RMS thresholds, or ElevenLabs voice by
+   setting the corresponding environment variables before launching the client.
+
+Because the audio travels straight from the microphone to OpenAI (with the proxy just relaying
+bytes), you avoid double-uploading through a slow residential network link. Latency drops to what the
+OpenAI Realtime service and ElevenLabs require.
 
 ## Summary
 

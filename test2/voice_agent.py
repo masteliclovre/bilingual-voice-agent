@@ -2,7 +2,7 @@
 # Continuous bilingual (HR/EN) voice agent — low-latency edition
 # - Always-listening RMS VAD turn-taking (no click)
 # - Local transcription (faster-whisper) — in-memory (no temp WAV)
-# - OpenAI streaming for reasoning (speak sentence-by-sentence)
+# - OpenAI or Groq streaming for reasoning (speak sentence-by-sentence)
 # - ElevenLabs TTS streamed to speakers (pcm_16000)
 # - Offline TTS fallback (pyttsx3) when ElevenLabs is unavailable
 # - Conversation memory: rolling history + auto summary compression (background)
@@ -25,6 +25,13 @@ from openai import OpenAI
 from elevenlabs import ElevenLabs
 from scipy.signal import resample
 import requests  # add this
+
+try:
+    from groq import Groq  # Optional ultra-low-latency LLM backend
+    HAS_GROQ = True
+except Exception:  # pragma: no cover - optional dependency
+    Groq = None
+    HAS_GROQ = False
 
 ASR_REMOTE_URL = os.getenv("ASR_REMOTE_URL", "").strip() or None
 
@@ -68,6 +75,17 @@ RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.18"))
 
 # OpenAI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
+GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
+GROQ_MODEL = os.getenv("GROQ_MODEL", "llama3-70b-8192")
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "openai").strip().lower()
+if LLM_PROVIDER not in {"openai", "groq"}:
+    LLM_PROVIDER = "openai"
+if LLM_PROVIDER == "openai" and not OPENAI_API_KEY and GROQ_API_KEY:
+    # Auto-fallback when OpenAI key missing but Groq key present
+    LLM_PROVIDER = "groq"
+LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
+if not LLM_MODEL:
+    LLM_MODEL = GROQ_MODEL if LLM_PROVIDER == "groq" else OPENAI_MODEL
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
 OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "180"))  # keep replies short for voice
 
@@ -86,6 +104,9 @@ OFFLINE_TTS_VOICE_HINT_EN = os.getenv("OFFLINE_TTS_VOICE_HINT_EN", "en;eng;en-US
 # ElevenLabs latency tuning
 ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "2")  # "0".."4" string. 2 is a good balance.
 
+# Streaming chunker tuning
+STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48"))
+STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "1.4"))
 
 # =========================
 # Utilities
@@ -159,6 +180,56 @@ def init_openai():
         raise RuntimeError("Missing OPENAI_API_KEY in .env")
     return OpenAI(api_key=OPENAI_API_KEY)
 
+class LLMClient:
+    """Thin wrapper so we can swap OpenAI with Groq without touching the main loop."""
+
+    def __init__(self):
+        provider = LLM_PROVIDER or "openai"
+        self.provider = provider
+        self.model = LLM_MODEL
+
+        if provider == "groq":
+            if not GROQ_API_KEY:
+                raise RuntimeError("LLM_PROVIDER=groq but GROQ_API_KEY is missing.")
+            if not HAS_GROQ:
+                raise RuntimeError(
+                    "LLM_PROVIDER=groq requested but groq package is not installed. Run: pip install groq"
+                )
+            self.client = Groq(api_key=GROQ_API_KEY)
+        else:
+            self.client = init_openai()
+            self.provider = "openai"  # fallback to canonical value
+
+    def _common_params(self, messages, temperature, max_tokens, stream):
+        params = dict(
+            model=self.model,
+            messages=messages,
+            temperature=temperature,
+        )
+        if max_tokens:
+            params["max_tokens"] = max_tokens
+        if stream:
+            params["stream"] = True
+        return params
+
+    def stream_text(self, messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
+        params = self._common_params(messages, temperature, max_tokens, stream=True)
+        response = self.client.chat.completions.create(**params)
+        for chunk in response:
+            try:
+                delta = chunk.choices[0].delta
+                token = getattr(delta, "content", None)
+            except Exception:
+                token = None
+            if token:
+                yield token
+
+    def complete(self, messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
+        params = self._common_params(messages, temperature, max_tokens, stream=False)
+        resp = self.client.chat.completions.create(**params)
+        return resp.choices[0].message.content.strip()
+
+
 def init_elevenlabs():
     if not ELEVENLABS_API_KEY:
         raise RuntimeError("Missing ELEVENLABS_API_KEY in .env")
@@ -201,35 +272,37 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
 
 
 # =========================
-# OpenAI — streaming
+# LLM streaming utilities
 # =========================
 
 _SENT_END_RE = re.compile(r"[\.!\?…]\s+$")
 
-def openai_stream_sentences(oa: OpenAI, messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
-    """
-    Stream tokens and yield whenever a sentence seems complete.
-    """
-    buf = []
-    for chunk in oa.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        messages=messages,
-        stream=True,
-    ):
-        try:
-            delta = chunk.choices[0].delta  # OpenAI python SDK v1
-            token = getattr(delta, "content", None)
-        except Exception:
-            token = None
+
+def stream_text_segments(llm: "LLMClient", messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
+    """Stream tokens from the LLM and release speech-sized segments ASAP."""
+
+    buf: list[str] = []
+    last_flush = time.time()
+    for token in llm.stream_text(messages, temperature=temperature, max_tokens=max_tokens):
         if not token:
             continue
         buf.append(token)
         joined = "".join(buf)
+        now = time.time()
+        should_flush = False
+
         if _SENT_END_RE.search(joined):
+            should_flush = True
+        elif len(joined) >= STREAMING_MIN_CHARS:
+            should_flush = True
+        elif (now - last_flush) >= STREAMING_MAX_WAIT and joined.strip():
+            should_flush = True
+
+        if should_flush:
             yield joined
             buf.clear()
+            last_flush = now
+
     if buf:
         yield "".join(buf)
 
@@ -380,8 +453,8 @@ class Memory:
     Keeps rolling verbatim turns + an accumulated summary.
     We summarize every N user turns to keep context compact.
     """
-    def __init__(self, oa: OpenAI):
-        self.oa = oa
+    def __init__(self, llm: "LLMClient"):
+        self.llm = llm
         self.summary = ""           # long-term compressed memory
         self.window = []            # recent messages: [{'role':'user'|'assistant','content':...}, ...]
         self.user_turns_since_summary = 0
@@ -413,7 +486,7 @@ class Memory:
         for m in self.window:
             msgs.append(m)
         try:
-            new_summary = openai_complete(self.oa, msgs, temperature=0.2)
+            new_summary = self.llm.complete(msgs, temperature=0.2)
             self.summary = new_summary
             self.user_turns_since_summary = 0
         except Exception as e:
@@ -436,20 +509,6 @@ class Memory:
             msgs.append({"role": "system", "content": f"Conversation summary memory:\n{self.summary}"})
         msgs.extend(self.window)
         return msgs
-
-
-# =========================
-# Thin non-streaming OpenAI helper (used by Memory)
-# =========================
-
-def openai_complete(oa: OpenAI, messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
-    resp = oa.chat.completions.create(
-        model=OPENAI_MODEL,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        messages=messages,
-    )
-    return resp.choices[0].message.content.strip()
 
 
 # =========================
@@ -531,7 +590,7 @@ class ContinuousListener:
 def main():
     list_audio_devices()
 
-    oa = init_openai()
+    llm = LLMClient()
     whisper = None
     if not ASR_REMOTE_URL:
         whisper = load_whisper()
@@ -550,7 +609,7 @@ def main():
     # Persistent audio output to reduce latency
     out = OutputAudio(samplerate=TARGET_SR, channels=1)
 
-    mem = Memory(oa)
+    mem = Memory(llm)
     listener = ContinuousListener()
 
     print("\nBilingual voice agent ready. (HR/EN)")
@@ -595,7 +654,7 @@ def main():
                 # 4) LLM reply — stream sentences and speak each sentence immediately
                 assistant_text_parts = []
                 print("🤖 Assistant: ", end="", flush=True)
-                for sent in openai_stream_sentences(oa, messages):
+                for sent in stream_text_segments(llm, messages):
                     # print and speak as we go
                     print(sent, end="", flush=True)
                     assistant_text_parts.append(sent)

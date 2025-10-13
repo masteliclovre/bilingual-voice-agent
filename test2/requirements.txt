@@ -5,6 +5,7 @@ pydub
 numpy
 python-dotenv
 openai
+groq
 elevenlabs
 webrtcvad-wheels ; sys_platform == "win32"
 pyttsx3

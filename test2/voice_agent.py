@@ -20,7 +20,40 @@ import base64
 from dataclasses import dataclass
 from typing import Optional
 import numpy as np
-import sounddevice as sd
+from textwrap import dedent
+
+try:
+    import sounddevice as sd
+except ImportError as exc:
+    print(
+        dedent(
+            """
+            The 'sounddevice' package is not installed. Install it with:
+                pip install sounddevice
+            The voice agent uses PortAudio via sounddevice for microphone capture and playback.
+            """
+        ).strip(),
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from exc
+except OSError as exc:
+    print(
+        dedent(
+            """
+            sounddevice could not load the PortAudio runtime that powers microphone/speaker I/O.
+            Install the PortAudio shared library for your platform and then reinstall sounddevice:
+              • Windows: `pip install sounddevice` (ships with PortAudio). If it still fails, install
+                the latest Microsoft Visual C++ Redistributable, then reinstall sounddevice.
+              • macOS: `brew install portaudio` and reinstall sounddevice.
+              • Debian/Ubuntu: `sudo apt install libportaudio2` (and optionally `portaudio19-dev`).
+            After installing the dependency, rerun `pip install --force-reinstall sounddevice`.
+            If you cannot install PortAudio locally, set REMOTE_AGENT_URL to use the RunPod server
+            instead of local audio capture.
+            """
+        ).strip(),
+        file=sys.stderr,
+    )
+    raise SystemExit(1) from exc
 from dotenv import load_dotenv
 from faster_whisper import WhisperModel
 from openai import OpenAI

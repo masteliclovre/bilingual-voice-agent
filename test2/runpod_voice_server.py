@@ -24,6 +24,29 @@ from elevenlabs import ElevenLabs
 
 load_dotenv()
 
+def ensure_hf_transfer_optional():
+    """Disable the Hugging Face fast-transfer path if the package is missing."""
+
+    enable_fast = os.getenv("HF_HUB_ENABLE_HF_TRANSFER", "").strip()
+    if not enable_fast:
+        return
+
+    truthy = {"1", "true", "yes", "on"}
+    if enable_fast.lower() not in truthy:
+        return
+
+    try:
+        __import__("hf_transfer")
+    except ModuleNotFoundError:
+        print(
+            "HF_HUB_ENABLE_HF_TRANSFER is set but hf_transfer is not installed. "
+            "Falling back to the standard downloader."
+        )
+        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
+
+ensure_hf_transfer_optional()
+
 # =========================
 # Config (mirrors voice_agent.py)
 # =========================

@@ -22,7 +22,12 @@ from faster_whisper import WhisperModel
 from openai import OpenAI
 from elevenlabs import ElevenLabs
 
+from debug_tools import install_exception_logging, log_startup_diagnostics
+
 load_dotenv()
+
+install_exception_logging("runpod_voice_server")
+log_startup_diagnostics("runpod_voice_server")
 
 def ensure_hf_transfer_optional():
     """Disable the Hugging Face fast-transfer path if the package is missing."""

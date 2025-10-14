@@ -61,6 +61,8 @@ from elevenlabs import ElevenLabs
 from scipy.signal import resample
 import requests  # add this
 
+from debug_tools import install_exception_logging, log_startup_diagnostics
+
 try:
     from groq import Groq  # Optional ultra-low-latency LLM backend
     HAS_GROQ = True
@@ -84,6 +86,9 @@ except Exception:
 # =========================
 
 load_dotenv()
+
+install_exception_logging("voice_agent")
+log_startup_diagnostics("voice_agent")
 
 OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")

@@ -16,6 +16,8 @@ import time
 import wave
 import threading
 import queue
+import base64
+from dataclasses import dataclass
 from typing import Optional
 import numpy as np
 import sounddevice as sd
@@ -34,7 +36,8 @@ except Exception:  # pragma: no cover - optional dependency
     HAS_GROQ = False
 
 ASR_REMOTE_URL = os.getenv("ASR_REMOTE_URL", "").strip() or None
-
+REMOTE_AGENT_URL = os.getenv("REMOTE_AGENT_URL", "").strip() or None
+REMOTE_AGENT_TOKEN = os.getenv("REMOTE_AGENT_TOKEN", "").strip() or None
 
 # Optional offline TTS
 try:
@@ -590,26 +593,37 @@ class ContinuousListener:
 def main():
     list_audio_devices()
 
-    llm = LLMClient()
-    whisper = None
-    if not ASR_REMOTE_URL:
-        whisper = load_whisper()
+    remote_client: Optional[RemoteAgentClient] = None
+    llm: Optional[LLMClient] = None
+    whisper: Optional[WhisperModel] = None
+    mem: Optional[Memory] = None
+    el: Optional[ElevenLabs] = None
+
+    asr_url = ASR_REMOTE_URL
+    if REMOTE_AGENT_URL:
+        if ASR_REMOTE_URL:
+            print("REMOTE_AGENT_URL set — ignoring ASR_REMOTE_URL (full pipeline handled remotely).")
+        asr_url = None
+        print(f"Using remote voice agent backend at: {REMOTE_AGENT_URL}")
+        remote_client = RemoteAgentClient(REMOTE_AGENT_URL, REMOTE_AGENT_TOKEN)
     else:
-        print(f"Using remote ASR at: {ASR_REMOTE_URL}")
+        llm = LLMClient()
+        if not asr_url:
+            whisper = load_whisper()
+        else:
+            print(f"Using remote ASR at: {asr_url}")
 
+        try:
+            el = init_elevenlabs()
+        except Exception as e:
+            print("ElevenLabs init warning:", e)
+            print("Proceeding with offline TTS only.")
 
-    # ElevenLabs client (optional — we will still run with offline fallback if init fails)
-    el = None
-    try:
-        el = init_elevenlabs()
-    except Exception as e:
-        print("ElevenLabs init warning:", e)
-        print("Proceeding with offline TTS only.")
+        mem = Memory(llm)
 
     # Persistent audio output to reduce latency
     out = OutputAudio(samplerate=TARGET_SR, channels=1)
 
-    mem = Memory(llm)
     listener = ContinuousListener()
 
     print("\nBilingual voice agent ready. (HR/EN)")
@@ -627,9 +641,36 @@ def main():
                 if wav_buf.getbuffer().nbytes < 32000:
                     continue
 
+                if remote_client:
+                    try:
+                        result = remote_client.process(wav_buf)
+                    except Exception as e:
+                        print("Remote agent error:", e)
+                        continue
+                    if not result or not result.user_text:
+                        continue
+                    if result.skipped:
+                        if (result.reason == "wake_word_missing") and WAKE_WORD:
+                            print(f"(Ignored — missing wake word '{WAKE_WORD}')")
+                        continue
+                    flag = "🇭🇷" if (result.lang or "").startswith("hr") else "🇬🇧"
+                    print(f"{flag} You: {result.user_text}")
+                    print("🤖 Assistant: ", end="", flush=True)
+                    print(result.assistant_text)
+                    if result.audio_pcm16:
+                        if result.sample_rate != TARGET_SR:
+                            pcm = np.frombuffer(result.audio_pcm16, dtype=np.int16).astype(np.float32) / 32768.0
+                            pcm_16k = resample_to_16k(pcm, result.sample_rate)
+                            out.write_float_np(pcm_16k)
+                        else:
+                            out.write_int16_bytes(result.audio_pcm16)
+                    else:
+                        print("(Remote agent returned no audio — skipping playback)")
+                    continue
+
                 # 2) Transcribe
-                if ASR_REMOTE_URL:
-                    user_text, lang = remote_transcribe(ASR_REMOTE_URL, wav_buf)
+                if asr_url:
+                    user_text, lang = remote_transcribe(asr_url, wav_buf)
                 else:
                     user_text, lang = whisper_transcribe(whisper, wav_buf)
 
@@ -694,6 +735,97 @@ def remote_transcribe(url: str, wav_buf: io.BytesIO):
     except Exception as e:
         print("Remote ASR error:", e)
         return "", None
+
+
+@dataclass
+class RemoteAgentResult:
+    user_text: str
+    assistant_text: str
+    lang: Optional[str]
+    audio_pcm16: bytes
+    sample_rate: int
+    session_id: Optional[str] = None
+    skipped: bool = False
+    reason: Optional[str] = None
+
+
+class RemoteAgentClient:
+    def __init__(self, base_url: str, token: Optional[str] = None):
+        self.base_url = base_url.rstrip("/")
+        if not self.base_url.endswith("/api"):
+            self.base_url = f"{self.base_url}/api"
+        self.token = token.strip() if token else None
+        self.session_id: Optional[str] = None
+
+    def _headers(self):
+        headers = {}
+        if self.token:
+            headers["X-Auth-Token"] = self.token
+        return headers
+
+    def ensure_session(self):
+        if self.session_id:
+            return
+        resp = requests.post(
+            f"{self.base_url}/session",
+            headers=self._headers(),
+            timeout=15,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        sid = data.get("session_id")
+        if not sid:
+            raise RuntimeError("Remote agent did not return a session_id")
+        self.session_id = sid
+
+    def process(self, wav_buf: io.BytesIO) -> Optional[RemoteAgentResult]:
+        payload = wav_buf.getvalue()
+        if not payload:
+            return None
+        attempts = 0
+        while attempts < 2:
+            attempts += 1
+            self.ensure_session()
+            files = {"audio": ("audio.wav", payload, "audio/wav")}
+            data = {"session_id": self.session_id}
+            resp = requests.post(
+                f"{self.base_url}/process",
+                headers=self._headers(),
+                files=files,
+                data=data,
+                timeout=120,
+            )
+            if resp.status_code in (401, 403):
+                raise RuntimeError("Remote agent authentication failed")
+            if resp.status_code in (404, 410):
+                # Session expired — request a new one and retry
+                self.session_id = None
+                continue
+            resp.raise_for_status()
+            body = resp.json()
+            if body.get("error"):
+                raise RuntimeError(body["error"])
+            sid = body.get("session_id")
+            if sid:
+                self.session_id = sid
+            user_text = body.get("text", "") or ""
+            assistant_text = body.get("assistant_text", "") or ""
+            lang = body.get("lang") or None
+            audio_b64 = body.get("tts_audio_b64")
+            audio_bytes = base64.b64decode(audio_b64) if audio_b64 else b""
+            sr = int(body.get("tts_sample_rate", TARGET_SR) or TARGET_SR)
+            skipped = bool(body.get("skipped"))
+            return RemoteAgentResult(
+                user_text=user_text,
+                assistant_text=assistant_text,
+                lang=lang,
+                audio_pcm16=audio_bytes,
+                sample_rate=sr,
+                session_id=self.session_id,
+                skipped=skipped,
+                reason=body.get("reason"),
+            )
+        raise RuntimeError("Remote agent unavailable after retries")
 
 
 if __name__ == "__main__":

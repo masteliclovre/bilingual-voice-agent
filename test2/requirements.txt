@@ -17,3 +17,4 @@ fastapi
 uvicorn[standard]
 python-multipart
 websockets
+hf_transfer

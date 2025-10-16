@@ -56,7 +56,7 @@ ensure_hf_transfer_optional()
 # Config (mirrors voice_agent.py)
 # =========================
 
-OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
+DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vFQACl5nAIV0owAavYxE")
 
@@ -140,11 +140,16 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     return text, lang
 
 
+llm_clients: Dict[str, "LLMClient"] = {}
+
+
 class LLMClient:
-    def __init__(self):
-        if not OPENAI_API_KEY:
+    def __init__(self, api_key: str):
+        api_key = api_key.strip()
+        if not api_key:
             raise RuntimeError("Missing OPENAI_API_KEY for remote voice agent server.")
-        self.client = OpenAI(api_key=OPENAI_API_KEY)
+        self.api_key = api_key
+        self.client = OpenAI(api_key=api_key)
         self.model = OPENAI_MODEL
 
     def complete(self, messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
@@ -220,6 +225,15 @@ def init_elevenlabs() -> Optional[ElevenLabs]:
     return ElevenLabs(api_key=ELEVENLABS_API_KEY)
 
 
+def get_llm_client(api_key_override: Optional[str]) -> LLMClient:
+    key = (api_key_override or DEFAULT_OPENAI_API_KEY).strip()
+    if not key:
+        raise RuntimeError("Missing OPENAI_API_KEY for remote voice agent server.")
+    if key not in llm_clients:
+        llm_clients[key] = LLMClient(key)
+    return llm_clients[key]
+
+
 def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
     audio_gen = el.text_to_speech.convert(
         voice_id=ELEVENLABS_VOICE_ID,
@@ -240,13 +254,13 @@ def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
 @dataclass
 class SessionState:
     memory: Memory
+    api_key: str
     last_lang: Optional[str] = None
     turns: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
 whisper_model = load_whisper()
-llm_client = LLMClient()
 eleven_client = init_elevenlabs()
 sessions: Dict[str, SessionState] = {}
 
@@ -256,11 +270,18 @@ def require_auth(x_auth: Optional[str] = Header(None)):
         raise HTTPException(status_code=401, detail="Invalid auth token")
 
 
-def get_session(session_id: Optional[str]) -> tuple[str, SessionState]:
+def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> tuple[str, SessionState]:
+    llm_client = get_llm_client(api_key_override)
     if not session_id or session_id not in sessions:
         session_id = uuid.uuid4().hex
-        sessions[session_id] = SessionState(memory=Memory(llm_client))
-    return session_id, sessions[session_id]
+        sessions[session_id] = SessionState(memory=Memory(llm_client), api_key=llm_client.api_key)
+    else:
+        state = sessions[session_id]
+        if state.api_key != llm_client.api_key:
+            state.memory.llm = llm_client
+            state.api_key = llm_client.api_key
+    state = sessions[session_id]
+    return session_id, state
 
 
 @app.get("/healthz")
@@ -269,9 +290,14 @@ def healthz():
 
 
 @app.post("/api/session")
-def create_session(_: None = Depends(require_auth)):
-    session_id = uuid.uuid4().hex
-    sessions[session_id] = SessionState(memory=Memory(llm_client))
+def create_session(
+    _: None = Depends(require_auth),
+    x_openai_key: Optional[str] = Header(None),
+):
+    try:
+        session_id, _ = get_session(None, x_openai_key)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
     return {"session_id": session_id}
 
 
@@ -280,12 +306,18 @@ async def process_turn(
     audio: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
     _: None = Depends(require_auth),
+    x_openai_key: Optional[str] = Header(None),
+    openai_api_key: Optional[str] = Form(None),
 ):
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio payload")
 
-    session_id, state = get_session(session_id)
+    api_key_override = openai_api_key or x_openai_key
+    try:
+        session_id, state = get_session(session_id, api_key_override)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
 
     wav_buf = io.BytesIO(audio_bytes)
     user_text, lang = whisper_transcribe(whisper_model, wav_buf)
@@ -318,7 +350,7 @@ async def process_turn(
     with state.lock:
         state.memory.add_user(user_text)
         messages = state.memory.build_prompt(lang)
-        assistant_text = llm_client.complete(messages)
+        assistant_text = state.memory.llm.complete(messages)
         state.memory.add_assistant(assistant_text)
         state.memory.maybe_summarize()
         state.last_lang = lang or state.last_lang

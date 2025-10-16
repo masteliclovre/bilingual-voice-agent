@@ -111,6 +111,8 @@ except Exception:  # pragma: no cover - optional dependency
     Groq = None
     HAS_GROQ = False
 
+load_dotenv()
+
 ASR_REMOTE_URL = os.getenv("ASR_REMOTE_URL", "").strip() or None
 REMOTE_AGENT_URL = os.getenv("REMOTE_AGENT_URL", "").strip() or None
 REMOTE_AGENT_TOKEN = os.getenv("REMOTE_AGENT_TOKEN", "").strip() or None
@@ -121,12 +123,6 @@ try:
     HAS_PYTTXS3 = True
 except Exception:
     HAS_PYTTXS3 = False
-
-# =========================
-# Config
-# =========================
-
-load_dotenv()
 
 install_exception_logging("voice_agent")
 log_startup_diagnostics("voice_agent")

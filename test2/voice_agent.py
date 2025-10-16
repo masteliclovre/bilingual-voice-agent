@@ -63,6 +63,9 @@ from elevenlabs import ElevenLabs
 from scipy.signal import resample
 import requests  # add this
 
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
 try:
     import torch
     from silero_vad import load_silero_vad
@@ -203,6 +206,32 @@ ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "3")  # "0".."4" stri
 # Streaming chunker tuning
 STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48") or "48")
 STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "1.4"))
+HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "4.0"))
+HTTP_READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "60.0"))
+HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
+
+
+def _configure_http_session(session: requests.Session) -> requests.Session:
+    adapter = HTTPAdapter(
+        pool_connections=8,
+        pool_maxsize=16,
+        max_retries=Retry(total=2, backoff_factor=0.1, status_forcelist=[429, 502, 503, 504]),
+    )
+    session.mount("http://", adapter)
+    session.mount("https://", adapter)
+    return session
+
+
+_http_session_lock = threading.Lock()
+_shared_http_session: Optional[requests.Session] = None
+
+
+def _get_shared_http_session() -> requests.Session:
+    global _shared_http_session
+    with _http_session_lock:
+        if _shared_http_session is None:
+            _shared_http_session = _configure_http_session(requests.Session())
+    return _shared_http_session
 
 # =========================
 # Utilities
@@ -484,7 +513,15 @@ class OutputAudio:
     Persistent output stream to reduce device open/close overhead.
     """
     def __init__(self, samplerate=TARGET_SR, channels=1):
-        self.stream = sd.OutputStream(samplerate=samplerate, channels=channels, dtype='float32')
+        stream_kwargs = dict(
+            samplerate=samplerate,
+            channels=channels,
+            dtype='float32',
+        )
+        try:
+            self.stream = sd.OutputStream(latency='low', **stream_kwargs)
+        except Exception:
+            self.stream = sd.OutputStream(**stream_kwargs)
         self.stream.start()
 
     def write_int16_bytes(self, pcm_bytes: bytes):
@@ -759,13 +796,22 @@ class ContinuousListener:
                 last_above = time.time()
                 started_speaking = True
 
+        stream_kwargs = dict(
+            device=self.device_index,
+            channels=CHANNELS,
+            samplerate=self.device_sr,
+            dtype='float32',
+            blocksize=frame_samples,
+            callback=callback,
+        )
+
         try:
-            with sd.InputStream(device=self.device_index,
-                                channels=CHANNELS,
-                                samplerate=self.device_sr,
-                                dtype='float32',
-                                blocksize=frame_samples,
-                                callback=callback):
+            try:
+                stream = sd.InputStream(latency='low', **stream_kwargs)
+            except Exception:
+                stream = sd.InputStream(**stream_kwargs)
+
+            with stream:
                 while True:
                     time.sleep(0.04)
                     now = time.time()
@@ -983,7 +1029,7 @@ def remote_transcribe(url: str, wav_buf: io.BytesIO):
     try:
         wav_buf.seek(0)
         files = {"file": ("audio.wav", wav_buf.read(), "audio/wav")}
-        r = requests.post(url, files=files, timeout=30)
+        r = session.post(url, files=files, timeout=HTTP_TIMEOUT)
         r.raise_for_status()
         data = r.json()
         return data.get("text", "") or "", data.get("lang", "") or None
@@ -1012,6 +1058,7 @@ class RemoteAgentClient:
         self.token = token.strip() if token else None
         self.openai_api_key = openai_api_key.strip() if openai_api_key else None
         self.session_id: Optional[str] = None
+        self.session = _configure_http_session(requests.Session())
 
     def _headers(self):
         headers = {}
@@ -1024,10 +1071,10 @@ class RemoteAgentClient:
     def ensure_session(self):
         if self.session_id:
             return
-        resp = requests.post(
+        resp = self.session.post(
             f"{self.base_url}/session",
             headers=self._headers(),
-            timeout=15,
+            timeout=HTTP_TIMEOUT,
         )
         resp.raise_for_status()
         data = resp.json()
@@ -1048,12 +1095,12 @@ class RemoteAgentClient:
             data = {"session_id": self.session_id}
             if self.openai_api_key:
                 data["openai_api_key"] = self.openai_api_key
-            resp = requests.post(
+            resp = self.session.post(
                 f"{self.base_url}/process",
                 headers=self._headers(),
                 files=files,
                 data=data,
-                timeout=120,
+                timeout=HTTP_TIMEOUT,
             )
             if resp.status_code in (401, 403):
                 raise RuntimeError("Remote agent authentication failed")

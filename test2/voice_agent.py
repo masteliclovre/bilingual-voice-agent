@@ -17,6 +17,8 @@ import wave
 import threading
 import queue
 import base64
+import contextlib
+import concurrent.futures
 from dataclasses import dataclass
 from typing import Optional
 import numpy as np
@@ -61,6 +63,45 @@ from elevenlabs import ElevenLabs
 from scipy.signal import resample
 import requests  # add this
 
+try:
+    import torch
+    from silero_vad import load_silero_vad
+    _silero_vad_raw = load_silero_vad()
+    if isinstance(_silero_vad_raw, tuple):
+        _silero_vad_model, _silero_vad_utils = _silero_vad_raw
+
+        def _silero_get_speech_timestamps(audio_tensor, sr, threshold=0.5):
+            return _silero_vad_utils["get_speech_timestamps"](
+                audio_tensor,
+                _silero_vad_model,
+                sampling_rate=sr,
+                threshold=threshold,
+            )
+
+    else:
+        _silero_vad_model = _silero_vad_raw
+
+        def _silero_get_speech_timestamps(audio_tensor, sr, threshold=0.5):
+            return _silero_vad_model.get_speech_timestamps(
+                audio_tensor, sr, threshold=threshold
+            )
+
+    HAS_SILERO_VAD = True
+except Exception:
+    torch = None  # type: ignore[assignment]
+    _silero_get_speech_timestamps = None
+    HAS_SILERO_VAD = False
+
+try:
+    import pygame
+
+    HAS_PYGAME = True
+    _PYGAME_MIXER_INITIALIZED = False
+except Exception:
+    pygame = None  # type: ignore[assignment]
+    HAS_PYGAME = False
+    _PYGAME_MIXER_INITIALIZED = False
+
 from debug_tools import install_exception_logging, log_startup_diagnostics
 
 try:
@@ -94,7 +135,9 @@ OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "")
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vFQACl5nAIV0owAavYxE")
 # Ako model nije lokalno, faster-whisper će ga povući s HF:
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "GoranS/whisper-large-v3-turbo-hr-parla-ctranslate2")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "base")
+_whisper_lang_env = os.getenv("WHISPER_LANG_HINT", "hr").strip()
+WHISPER_LANG_HINT = _whisper_lang_env.lower() or None
 
 PREFERRED_INPUT_NAME = os.getenv("PREFERRED_INPUT_NAME", "").strip() or None
 INPUT_DEVICE_INDEX = os.getenv("INPUT_DEVICE_INDEX", "").strip()
@@ -143,7 +186,7 @@ OFFLINE_TTS_VOICE_HINT_HR = os.getenv("OFFLINE_TTS_VOICE_HINT_HR", "hr;croat;hrv
 OFFLINE_TTS_VOICE_HINT_EN = os.getenv("OFFLINE_TTS_VOICE_HINT_EN", "en;eng;en-US;English")
 
 # ElevenLabs latency tuning
-ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "2")  # "0".."4" string. 2 is a good balance.
+ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "3")  # "0".."4" string. Higher buffers reduce stutter.
 
 # Streaming chunker tuning
 STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48"))
@@ -199,6 +242,42 @@ def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
         wf.writeframes(int16.tobytes())
     buf.seek(0)
     return buf
+
+
+class LatencyTracker:
+    """Context manager helper for per-turn latency accounting."""
+
+    def __init__(self):
+        self.events: list[tuple[str, float]] = []
+
+    @contextlib.contextmanager
+    def track(self, label: str):
+        start = time.perf_counter()
+        try:
+            yield
+        finally:
+            end = time.perf_counter()
+            self.events.append((label, max(0.0, end - start)))
+
+    def extend(self, label: str, duration: float):
+        self.events.append((label, max(0.0, duration)))
+
+    def clear(self):
+        self.events.clear()
+
+    def report(self, title: str = "⏱️ Latency breakdown"):
+        if not self.events:
+            return
+        total = sum(d for _, d in self.events)
+        if total <= 0:
+            return
+        print()
+        print(title)
+        for label, duration in self.events:
+            pct = (duration / total * 100.0) if total else 0.0
+            print(f"  • {label:<18} {duration * 1000:7.1f} ms ({pct:4.1f}%)")
+        print(f"  • {'total':<18} {total * 1000:7.1f} ms")
+
 
 
 # =========================
@@ -281,6 +360,35 @@ def init_elevenlabs():
 # ASR (in-memory) — faster-whisper
 # =========================
 
+def preprocess_with_vad(audio_np: np.ndarray, sr: int = TARGET_SR, threshold: float = 0.5) -> np.ndarray:
+    """Remove leading/trailing silence using Silero VAD before Whisper."""
+    if not HAS_SILERO_VAD or audio_np.size == 0:
+        return audio_np
+    try:
+        audio_tensor = torch.from_numpy(audio_np)
+    except Exception:
+        return audio_np
+    if audio_tensor.dim() > 1:
+        audio_tensor = audio_tensor.mean(dim=1)
+    timestamps = _silero_get_speech_timestamps(audio_tensor, sr, threshold=threshold) if _silero_get_speech_timestamps else []
+    if not timestamps:
+        return audio_np
+    speech_chunks = []
+    for ts in timestamps:
+        start = int(ts.get("start", 0))
+        end = int(ts.get("end", 0))
+        if end <= start:
+            continue
+        start = max(0, start)
+        end = min(len(audio_np), end)
+        if start >= len(audio_np) or end <= 0:
+            continue
+        speech_chunks.append(audio_np[start:end])
+    if not speech_chunks:
+        return audio_np
+    return np.concatenate(speech_chunks).astype(np.float32)
+
+
 def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     """
     Read 16k mono WAV from memory, feed directly to faster-whisper (no disk I/O).
@@ -297,16 +405,23 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     if sr != TARGET_SR:
         audio = resample_to_16k(audio, sr)
 
-    segments, info = whisper.transcribe(
+    audio = preprocess_with_vad(audio, TARGET_SR)
+
+    kwargs = dict(
         audio=audio,
-        beam_size=1,                       # greedy for speed
-        vad_filter=True,                   # trim silence
+        beam_size=1,
+        vad_filter=False,
         temperature=0.0,
-        language=None,                     # auto-detect
         condition_on_previous_text=False,
         word_timestamps=False,
         without_timestamps=True,
+        compression_ratio_threshold=2.4,
+        log_prob_threshold=-1.0,
+        no_speech_threshold=0.6,
     )
+    if WHISPER_LANG_HINT:
+        kwargs["language"] = WHISPER_LANG_HINT
+    segments, info = whisper.transcribe(**kwargs)
     text = "".join(seg.text for seg in segments).strip()
     lang = getattr(info, "language", None)
     return text, lang
@@ -378,6 +493,18 @@ class OutputAudio:
         except Exception:
             pass
 
+
+def _ensure_pygame_mixer():
+    global _PYGAME_MIXER_INITIALIZED
+    if not HAS_PYGAME:
+        raise RuntimeError(
+            "pygame is not installed. Install it with `pip install pygame` to enable batch TTS playback."
+        )
+    if not _PYGAME_MIXER_INITIALIZED:
+        pygame.mixer.init(frequency=44100)
+        _PYGAME_MIXER_INITIALIZED = True
+
+
 def tts_elevenlabs_stream_to_output(el: ElevenLabs, text: str, out: OutputAudio):
     """
     ElevenLabs TTS (pcm_16000) streamed directly to the persistent OutputAudio.
@@ -398,6 +525,34 @@ def tts_elevenlabs_stream_to_output(el: ElevenLabs, text: str, out: OutputAudio)
         got_audio = True
     if not got_audio:
         raise RuntimeError("ElevenLabs returned empty audio")
+
+
+def say_sentence_batch(el: ElevenLabs, text: str):
+    """Generate a full ElevenLabs utterance up front and play once."""
+    if not text.strip():
+        return
+    _ensure_pygame_mixer()
+    audio_bytes = el.text_to_speech.convert_to_audio_bytes(
+        text=text,
+        voice_id=ELEVENLABS_VOICE_ID,
+        model_id="eleven_multilingual_v2",
+        output_format="mp3_44100_128",
+    )
+    if isinstance(audio_bytes, (list, tuple)):
+        audio_bytes = b"".join(audio_bytes)
+    if not isinstance(audio_bytes, (bytes, bytearray)):
+        raise RuntimeError("Unexpected ElevenLabs batch response type.")
+    bio = io.BytesIO(bytes(audio_bytes))
+    bio.seek(0)
+    pygame.mixer.music.stop()
+    try:
+        pygame.mixer.music.load(bio, namehint="mp3")
+    except TypeError:
+        pygame.mixer.music.load(bio)
+    pygame.mixer.music.play()
+    while pygame.mixer.music.get_busy():
+        time.sleep(0.05)
+
 
 def _select_offline_voice(engine, lang_hint: Optional[str]):
     """
@@ -470,7 +625,10 @@ def say_sentence_with_fallback(el: Optional[ElevenLabs], out: OutputAudio, text:
         if el is None:
             tts_offline_pyttsx3(text, lang_hint)
         else:
-            tts_elevenlabs_stream_to_output(el, text, out)
+            try:
+                say_sentence_batch(el, text)
+            except Exception:
+                tts_elevenlabs_stream_to_output(el, text, out)
     except Exception as e:
         msg = str(e)
         print("TTS error:", msg)
@@ -636,6 +794,7 @@ def main():
     whisper: Optional[WhisperModel] = None
     mem: Optional[Memory] = None
     el: Optional[ElevenLabs] = None
+    executor: Optional[concurrent.futures.ThreadPoolExecutor] = None
 
     asr_url = ASR_REMOTE_URL
     if REMOTE_AGENT_URL:
@@ -658,6 +817,7 @@ def main():
             print("Proceeding with offline TTS only.")
 
         mem = Memory(llm)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
     # Persistent audio output to reduce latency
     out = OutputAudio(samplerate=TARGET_SR, channels=1)
@@ -674,45 +834,57 @@ def main():
     try:
         while True:
             try:
+                tracker = LatencyTracker()
                 # 1) Capture one utterance
-                wav_buf = listener.record_utterance()
+                with tracker.track("capture"):
+                    wav_buf = listener.record_utterance()
                 if wav_buf.getbuffer().nbytes < 32000:
+                    tracker.report("⏱️ Turn skipped (no usable audio)")
                     continue
 
                 if remote_client:
                     try:
-                        result = remote_client.process(wav_buf)
+                        with tracker.track("remote_agent"):
+                            result = remote_client.process(wav_buf)
                     except Exception as e:
                         print("Remote agent error:", e)
+                        tracker.report()
                         continue
                     if not result or not result.user_text:
+                        tracker.report("⏱️ Turn skipped (remote empty)")
                         continue
                     if result.skipped:
                         if (result.reason == "wake_word_missing") and WAKE_WORD:
                             print(f"(Ignored — missing wake word '{WAKE_WORD}')")
+                        tracker.report("⏱️ Turn skipped (wake word)")
                         continue
                     flag = "🇭🇷" if (result.lang or "").startswith("hr") else "🇬🇧"
                     print(f"{flag} You: {result.user_text}")
                     print("🤖 Assistant: ", end="", flush=True)
                     print(result.assistant_text)
                     if result.audio_pcm16:
-                        if result.sample_rate != TARGET_SR:
-                            pcm = np.frombuffer(result.audio_pcm16, dtype=np.int16).astype(np.float32) / 32768.0
-                            pcm_16k = resample_to_16k(pcm, result.sample_rate)
-                            out.write_float_np(pcm_16k)
-                        else:
-                            out.write_int16_bytes(result.audio_pcm16)
+                        with tracker.track("playback"):
+                            if result.sample_rate != TARGET_SR:
+                                pcm = np.frombuffer(result.audio_pcm16, dtype=np.int16).astype(np.float32) / 32768.0
+                                pcm_16k = resample_to_16k(pcm, result.sample_rate)
+                                out.write_float_np(pcm_16k)
+                            else:
+                                out.write_int16_bytes(result.audio_pcm16)
                     else:
                         print("(Remote agent returned no audio — skipping playback)")
+                    tracker.report()
                     continue
 
                 # 2) Transcribe
                 if asr_url:
-                    user_text, lang = remote_transcribe(asr_url, wav_buf)
+                    with tracker.track("remote_asr"):
+                        user_text, lang = remote_transcribe(asr_url, wav_buf)
                 else:
-                    user_text, lang = whisper_transcribe(whisper, wav_buf)
+                    with tracker.track("whisper_asr"):
+                        user_text, lang = whisper_transcribe(whisper, wav_buf)
 
                 if not user_text:
+                    tracker.report("⏱️ Turn skipped (no transcript)")
                     continue
 
                 # 2a) Wake word (optional)
@@ -721,28 +893,45 @@ def main():
                         user_text = user_text[len(WAKE_WORD):].lstrip(" ,.-:") or "Hej!"
                     else:
                         print(f"(Ignored — missing wake word '{WAKE_WORD}')")
+                        tracker.report("⏱️ Turn skipped (wake word)")
                         continue
 
                 flag = "🇭🇷" if (lang or "").startswith("hr") else "🇬🇧"
                 print(f"{flag} You: {user_text}")
 
                 # 3) Build contextful prompt with memory
-                mem.add_user(user_text)
-                messages = mem.build_prompt(user_lang_hint=lang)
+                with tracker.track("memory+prompt"):
+                    mem.add_user(user_text)
+                    messages = mem.build_prompt(user_lang_hint=lang)
 
                 # 4) LLM reply — stream sentences and speak each sentence immediately
                 assistant_text_parts = []
                 print("🤖 Assistant: ", end="", flush=True)
-                for sent in stream_text_segments(llm, messages):
-                    # print and speak as we go
-                    print(sent, end="", flush=True)
-                    assistant_text_parts.append(sent)
-                    say_sentence_with_fallback(el, out, sent, lang)
+                with tracker.track("llm_stream+tts"):
+                    future_tts: Optional[concurrent.futures.Future] = None
+                    for sent in stream_text_segments(llm, messages):
+                        print(sent, end="", flush=True)
+                        assistant_text_parts.append(sent)
+                        if executor is None:
+                            say_sentence_with_fallback(el, out, sent, lang)
+                            continue
+                        if future_tts is not None:
+                            future_tts.result()
+                        future_tts = executor.submit(
+                            say_sentence_with_fallback,
+                            el,
+                            out,
+                            sent,
+                            lang,
+                        )
+                    if future_tts is not None:
+                        future_tts.result()
                 print()  # newline
                 assistant_text = "".join(assistant_text_parts)
 
                 # 5) Add to memory
-                mem.add_assistant(assistant_text)
+                with tracker.track("memory_update"):
+                    mem.add_assistant(assistant_text)
 
                 # 5b) Summarize in background (non-blocking)
                 def _bg_sum():
@@ -757,9 +946,19 @@ def main():
                 break
             except Exception as e:
                 print("Error:", e)
+                tracker.report("⏱️ Turn errored")
                 time.sleep(0.2)
+            else:
+                tracker.report()
     finally:
         out.close()
+        if executor is not None:
+            executor.shutdown(wait=True)
+        if HAS_PYGAME and _PYGAME_MIXER_INITIALIZED:
+            try:
+                pygame.mixer.quit()
+            except Exception:
+                pass
 
 
 def remote_transcribe(url: str, wav_buf: io.BytesIO):

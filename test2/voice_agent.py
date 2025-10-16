@@ -132,6 +132,7 @@ if not REMOTE_AGENT_OPENAI_KEY:
 if not REMOTE_AGENT_OPENAI_KEY:
     REMOTE_AGENT_OPENAI_KEY = None
 
+
 # Optional offline TTS
 try:
     import pyttsx3  # offline fallback

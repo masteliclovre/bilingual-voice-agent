@@ -7,6 +7,9 @@ python-dotenv
 openai
 groq
 elevenlabs
+silero-vad
+torch
+pygame
 webrtcvad-wheels ; sys_platform == "win32"
 pyttsx3
 

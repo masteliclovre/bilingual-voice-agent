@@ -1,4 +1,4 @@
-# voice_agent_continuous.py
+# voice_agent.py
 # Continuous bilingual (HR/EN) voice agent — low-latency edition
 # - Always-listening RMS VAD turn-taking (no click)
 # - Local transcription (faster-whisper) — in-memory (no temp WAV)
@@ -189,7 +189,7 @@ OFFLINE_TTS_VOICE_HINT_EN = os.getenv("OFFLINE_TTS_VOICE_HINT_EN", "en;eng;en-US
 ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "3")  # "0".."4" string. Higher buffers reduce stutter.
 
 # Streaming chunker tuning
-STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48"))
+STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48") or "48")
 STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "1.4"))
 
 # =========================
@@ -787,7 +787,7 @@ class ContinuousListener:
 # =========================
 
 def main():
-    list_audio_devices()
+    #list_audio_devices()
 
     remote_client: Optional[RemoteAgentClient] = None
     llm: Optional[LLMClient] = None
@@ -997,7 +997,7 @@ class RemoteAgentClient:
     def _headers(self):
         headers = {}
         if self.token:
-            headers["X-Auth-Token"] = self.token
+            headers["X-Auth"] = self.token
         return headers
 
     def ensure_session(self):

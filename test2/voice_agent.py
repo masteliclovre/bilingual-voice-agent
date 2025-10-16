@@ -111,9 +111,26 @@ except Exception:  # pragma: no cover - optional dependency
     Groq = None
     HAS_GROQ = False
 
+load_dotenv()
+
 ASR_REMOTE_URL = os.getenv("ASR_REMOTE_URL", "").strip() or None
 REMOTE_AGENT_URL = os.getenv("REMOTE_AGENT_URL", "").strip() or None
 REMOTE_AGENT_TOKEN = os.getenv("REMOTE_AGENT_TOKEN", "").strip() or None
+
+
+def _env_truthy(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+
+REMOTE_AGENT_OPENAI_KEY = os.getenv("REMOTE_AGENT_OPENAI_KEY", "").strip()
+if not REMOTE_AGENT_OPENAI_KEY:
+    forward_flag = _env_truthy(os.getenv("REMOTE_AGENT_FORWARD_OPENAI_KEY"), True)
+    if forward_flag:
+        REMOTE_AGENT_OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+if not REMOTE_AGENT_OPENAI_KEY:
+    REMOTE_AGENT_OPENAI_KEY = None
 
 # Optional offline TTS
 try:
@@ -121,12 +138,6 @@ try:
     HAS_PYTTXS3 = True
 except Exception:
     HAS_PYTTXS3 = False
-
-# =========================
-# Config
-# =========================
-
-load_dotenv()
 
 install_exception_logging("voice_agent")
 log_startup_diagnostics("voice_agent")
@@ -802,7 +813,13 @@ def main():
             print("REMOTE_AGENT_URL set — ignoring ASR_REMOTE_URL (full pipeline handled remotely).")
         asr_url = None
         print(f"Using remote voice agent backend at: {REMOTE_AGENT_URL}")
-        remote_client = RemoteAgentClient(REMOTE_AGENT_URL, REMOTE_AGENT_TOKEN)
+        remote_client = RemoteAgentClient(
+            REMOTE_AGENT_URL,
+            REMOTE_AGENT_TOKEN,
+            openai_api_key=REMOTE_AGENT_OPENAI_KEY,
+        )
+        if REMOTE_AGENT_OPENAI_KEY:
+            print("Forwarding OpenAI API key to remote agent server.")
     else:
         llm = LLMClient()
         if not asr_url:
@@ -987,17 +1004,20 @@ class RemoteAgentResult:
 
 
 class RemoteAgentClient:
-    def __init__(self, base_url: str, token: Optional[str] = None):
+    def __init__(self, base_url: str, token: Optional[str] = None, openai_api_key: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/api"):
             self.base_url = f"{self.base_url}/api"
         self.token = token.strip() if token else None
+        self.openai_api_key = openai_api_key.strip() if openai_api_key else None
         self.session_id: Optional[str] = None
 
     def _headers(self):
         headers = {}
         if self.token:
             headers["X-Auth"] = self.token
+        if self.openai_api_key:
+            headers["X-OpenAI-Key"] = self.openai_api_key
         return headers
 
     def ensure_session(self):
@@ -1025,6 +1045,8 @@ class RemoteAgentClient:
             self.ensure_session()
             files = {"audio": ("audio.wav", payload, "audio/wav")}
             data = {"session_id": self.session_id}
+            if self.openai_api_key:
+                data["openai_api_key"] = self.openai_api_key
             resp = requests.post(
                 f"{self.base_url}/process",
                 headers=self._headers(),

@@ -96,9 +96,21 @@ def load_whisper():
         device=WHISPER_DEVICE,
         compute_type=WHISPER_COMPUTE,
         cpu_threads=os.cpu_count(),
-        num_workers=2,
+        num_workers=1,
     )
-    return WhisperModel(WHISPER_MODEL, **kwargs)
+    model = WhisperModel(WHISPER_MODEL, **kwargs)
+    
+    # GPU warmup
+    if WHISPER_DEVICE == "cuda":
+        print("Warming up GPU...")
+        dummy = np.zeros(16000, dtype=np.float32)
+        try:
+            list(model.transcribe(dummy, beam_size=1, vad_filter=False))
+            print("✓ GPU warmup complete")
+        except Exception as e:
+            print(f"Warmup warning: {e}")
+    
+    return model
 
 
 def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
@@ -107,7 +119,7 @@ def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
     target_len = int(len(audio_np) * TARGET_SR / src_sr)
     if target_len <= 0:
         return np.zeros(1, dtype=np.float32)
-    from scipy.signal import resample  # lazy import to avoid overhead before needed
+    from scipy.signal import resample
 
     return resample(audio_np, target_len).astype(np.float32)
 
@@ -125,6 +137,7 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     if sr != TARGET_SR:
         audio = resample_to_16k(audio, sr)
+    
     segments, info = whisper.transcribe(
         audio=audio,
         beam_size=1,

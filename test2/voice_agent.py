@@ -61,7 +61,7 @@ from faster_whisper import WhisperModel
 from openai import OpenAI
 from elevenlabs import ElevenLabs
 from scipy.signal import resample
-import requests  # add this
+import requests
 
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
@@ -327,14 +327,30 @@ class LatencyTracker:
 
 def load_whisper():
     print("Loading Whisper model (first run may take a bit)…")
-    # Add CPU/GPU perf knobs
     kwargs = dict(
-        device=WHISPER_DEVICE,          # "cuda" for GPU if available
-        compute_type=WHISPER_COMPUTE,   # "float16" on GPU, "int8_float16" on CPU
+        device=WHISPER_DEVICE,
+        compute_type=WHISPER_COMPUTE,
         cpu_threads=os.cpu_count(),
-        num_workers=2,
+        num_workers=1,
     )
-    return WhisperModel(WHISPER_MODEL, **kwargs)
+    model = WhisperModel(WHISPER_MODEL, **kwargs)
+    
+    # Warmup: Run dummy inference to load weights into GPU memory
+    if WHISPER_DEVICE in ("cuda", "auto"):
+        print("Warming up GPU...")
+        dummy_audio = np.zeros(16000, dtype=np.float32)
+        try:
+            list(model.transcribe(
+                dummy_audio,
+                beam_size=1,
+                vad_filter=False,
+                language=WHISPER_LANG_HINT,
+            ))
+            print("✓ GPU warmup complete")
+        except Exception as e:
+            print(f"Warmup warning: {e}")
+    
+    return model
 
 def init_openai():
     if not OPENAI_API_KEY:
@@ -401,35 +417,6 @@ def init_elevenlabs():
 # ASR (in-memory) — faster-whisper
 # =========================
 
-def preprocess_with_vad(audio_np: np.ndarray, sr: int = TARGET_SR, threshold: float = 0.5) -> np.ndarray:
-    """Remove leading/trailing silence using Silero VAD before Whisper."""
-    if not HAS_SILERO_VAD or audio_np.size == 0:
-        return audio_np
-    try:
-        audio_tensor = torch.from_numpy(audio_np)
-    except Exception:
-        return audio_np
-    if audio_tensor.dim() > 1:
-        audio_tensor = audio_tensor.mean(dim=1)
-    timestamps = _silero_get_speech_timestamps(audio_tensor, sr, threshold=threshold) if _silero_get_speech_timestamps else []
-    if not timestamps:
-        return audio_np
-    speech_chunks = []
-    for ts in timestamps:
-        start = int(ts.get("start", 0))
-        end = int(ts.get("end", 0))
-        if end <= start:
-            continue
-        start = max(0, start)
-        end = min(len(audio_np), end)
-        if start >= len(audio_np) or end <= 0:
-            continue
-        speech_chunks.append(audio_np[start:end])
-    if not speech_chunks:
-        return audio_np
-    return np.concatenate(speech_chunks).astype(np.float32)
-
-
 def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     """
     Read 16k mono WAV from memory, feed directly to faster-whisper (no disk I/O).
@@ -446,12 +433,10 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     if sr != TARGET_SR:
         audio = resample_to_16k(audio, sr)
 
-    audio = preprocess_with_vad(audio, TARGET_SR)
-
     kwargs = dict(
         audio=audio,
         beam_size=1,
-        vad_filter=False,
+        vad_filter=True,
         temperature=0.0,
         condition_on_previous_text=False,
         word_timestamps=False,
@@ -893,7 +878,7 @@ def main():
     print("- Speak naturally; a short pause ends your turn.")
     print("- Lower RMS_THRESH in .env if it misses quiet speech (e.g. 0.002).")
     if WAKE_WORD:
-        print(f"- Wake word enabled: say “{WAKE_WORD}” to start a turn.")
+        print(f"- Wake word enabled: say \"{WAKE_WORD}\" to start a turn.")
 
     try:
         while True:
@@ -1026,6 +1011,7 @@ def main():
 
 
 def remote_transcribe(url: str, wav_buf: io.BytesIO):
+    session = _get_shared_http_session()
     try:
         wav_buf.seek(0)
         files = {"file": ("audio.wav", wav_buf.read(), "audio/wav")}

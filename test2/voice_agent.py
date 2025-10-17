@@ -165,12 +165,12 @@ WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "float16")        # "float16" | "
 # Audio
 TARGET_SR = 16000
 CHANNELS = 1
-FRAME_DURATION_MS = int(os.getenv("FRAME_DURATION_MS", "20"))   # tighter frames for faster VAD
+FRAME_DURATION_MS = int(os.getenv("FRAME_DURATION_MS", "15"))   # tighter frames for faster VAD
 MAX_UTTERANCE_SECS = 45
-SILENCE_TIMEOUT_SECS = float(os.getenv("SILENCE_TIMEOUT_SECS", "1.2"))
+SILENCE_TIMEOUT_SECS = float(os.getenv("SILENCE_TIMEOUT_SECS", "0.2"))
 MIN_SPEECH_SECS = float(os.getenv("MIN_SPEECH_SECS", "0.3"))
 RMS_THRESH = float(os.getenv("RMS_THRESH", "0.003"))  # lower (e.g. 0.002) if your mic is quiet
-RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.18"))
+RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.12"))
 
 # OpenAI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -190,7 +190,7 @@ OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "180"))  # keep replies s
 
 # Memory
 MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "12"))
-SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "4"))
+SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "6"))
 
 # Wake word (optional)
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
@@ -201,11 +201,11 @@ OFFLINE_TTS_VOICE_HINT_HR = os.getenv("OFFLINE_TTS_VOICE_HINT_HR", "hr;croat;hrv
 OFFLINE_TTS_VOICE_HINT_EN = os.getenv("OFFLINE_TTS_VOICE_HINT_EN", "en;eng;en-US;English")
 
 # ElevenLabs latency tuning
-ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "3")  # "0".."4" string. Higher buffers reduce stutter.
+ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "2")  # "0".."4" string. Higher buffers reduce stutter.
 
 # Streaming chunker tuning
 STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48") or "48")
-STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "1.4"))
+STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "0.8"))
 HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "4.0"))
 HTTP_READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "60.0"))
 HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)

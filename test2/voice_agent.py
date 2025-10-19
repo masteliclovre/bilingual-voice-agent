@@ -6,7 +6,8 @@
 # - ElevenLabs TTS streamed to speakers (pcm_16000)
 # - Offline TTS fallback (pyttsx3) when ElevenLabs is unavailable
 # - Conversation memory: rolling history + auto summary compression (background)
-# Version: 2025-09-16
+# - Perceptual speed optimizations: thinking sounds (CACHED), instant acknowledgment
+# Version: 2025-10-19-cached
 
 import os
 import io
@@ -19,8 +20,9 @@ import queue
 import base64
 import contextlib
 import concurrent.futures
+import random
 from dataclasses import dataclass
-from typing import Optional
+from typing import Optional, Dict
 import numpy as np
 from textwrap import dedent
 
@@ -165,12 +167,12 @@ WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "float16")        # "float16" | "
 # Audio
 TARGET_SR = 16000
 CHANNELS = 1
-FRAME_DURATION_MS = int(os.getenv("FRAME_DURATION_MS", "15"))   # tighter frames for faster VAD
+FRAME_DURATION_MS = int(os.getenv("FRAME_DURATION_MS", "15"))
 MAX_UTTERANCE_SECS = 45
-SILENCE_TIMEOUT_SECS = float(os.getenv("SILENCE_TIMEOUT_SECS", "0.2"))
-MIN_SPEECH_SECS = float(os.getenv("MIN_SPEECH_SECS", "0.3"))
-RMS_THRESH = float(os.getenv("RMS_THRESH", "0.003"))  # lower (e.g. 0.002) if your mic is quiet
-RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.12"))
+SILENCE_TIMEOUT_SECS = float(os.getenv("SILENCE_TIMEOUT_SECS", "0.8"))
+MIN_SPEECH_SECS = float(os.getenv("MIN_SPEECH_SECS", "0.2"))
+RMS_THRESH = float(os.getenv("RMS_THRESH", "0.003"))
+RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.08"))
 
 # OpenAI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
@@ -186,7 +188,7 @@ LLM_MODEL = os.getenv("LLM_MODEL", "").strip()
 if not LLM_MODEL:
     LLM_MODEL = GROQ_MODEL if LLM_PROVIDER == "groq" else OPENAI_MODEL
 OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
-OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "180"))  # keep replies short for voice
+OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "120"))
 
 # Memory
 MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "12"))
@@ -196,19 +198,35 @@ SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "6"))
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
 
 # Offline TTS preferences (optional)
-OFFLINE_TTS_RATE = int(os.getenv("OFFLINE_TTS_RATE", "180"))  # words per min approx
+OFFLINE_TTS_RATE = int(os.getenv("OFFLINE_TTS_RATE", "180"))
 OFFLINE_TTS_VOICE_HINT_HR = os.getenv("OFFLINE_TTS_VOICE_HINT_HR", "hr;croat;hrv;hr-HR;Hrvatski")
 OFFLINE_TTS_VOICE_HINT_EN = os.getenv("OFFLINE_TTS_VOICE_HINT_EN", "en;eng;en-US;English")
 
 # ElevenLabs latency tuning
-ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "2")  # "0".."4" string. Higher buffers reduce stutter.
+ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "0")
 
 # Streaming chunker tuning
-STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "48") or "48")
-STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "0.8"))
+STREAMING_MIN_CHARS = int(os.getenv("STREAMING_MIN_CHARS", "20") or "20")
+STREAMING_MAX_WAIT = float(os.getenv("STREAMING_MAX_WAIT", "0.3"))
 HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "4.0"))
 HTTP_READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "60.0"))
 HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
+
+# Perceptual speed improvements - thinking sounds
+THINKING_PHRASES_HR = ["Hmm,", "Pa,", "Dobro,", "Hm, vidimo,", "Aha,", "Dakle,"]
+THINKING_PHRASES_EN = ["Hmm,", "Well,", "Let me think,", "Okay,", "Right,", "So,"]
+
+# Instant acknowledgment phrases
+ACK_PHRASES_HR = ["Slušam.", "Aha.", "Dobro.", "Razumijem.", "U redu."]
+ACK_PHRASES_EN = ["Got it.", "Okay.", "I see.", "Right.", "Understood."]
+
+# Enable/disable perceptual optimizations
+USE_THINKING_SOUNDS = _env_truthy(os.getenv("USE_THINKING_SOUNDS"), True)
+USE_INSTANT_ACK = _env_truthy(os.getenv("USE_INSTANT_ACK"), False)  # Može biti iritantno
+SLOW_RESPONSE_THRESHOLD = float(os.getenv("SLOW_RESPONSE_THRESHOLD", "2.5"))
+
+# Global cache for pre-generated thinking sounds
+THINKING_SOUNDS_CACHE: Dict[str, bytes] = {}
 
 
 def _configure_http_session(session: requests.Session) -> requests.Session:
@@ -283,6 +301,18 @@ def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
         wf.writeframes(int16.tobytes())
     buf.seek(0)
     return buf
+
+
+def get_thinking_phrase(lang: Optional[str]) -> str:
+    """Vrati random 'thinking' frazu prema jeziku."""
+    phrases = THINKING_PHRASES_HR if (lang or "").startswith("hr") else THINKING_PHRASES_EN
+    return random.choice(phrases)
+
+
+def get_ack_phrase(lang: Optional[str]) -> str:
+    """Vrati random acknowledgment frazu."""
+    phrases = ACK_PHRASES_HR if (lang or "").startswith("hr") else ACK_PHRASES_EN
+    return random.choice(phrases)
 
 
 class LatencyTracker:
@@ -414,6 +444,87 @@ def init_elevenlabs():
 
 
 # =========================
+# Thinking Sounds Cache System
+# =========================
+
+def elevenlabs_tts_pcm_bytes(el: ElevenLabs, text: str) -> bytes:
+    """
+    Generate PCM16 audio from ElevenLabs and return as bytes.
+    Used for caching thinking sounds.
+    """
+    audio_gen = el.text_to_speech.convert(
+        voice_id=ELEVENLABS_VOICE_ID,
+        optimize_streaming_latency=str(ELEVEN_STREAM_LATENCY),
+        output_format="pcm_16000",
+        text=text,
+        model_id="eleven_multilingual_v2",
+    )
+    pcm = bytearray()
+    for chunk in audio_gen:
+        if chunk:
+            pcm.extend(chunk)
+    if not pcm:
+        raise RuntimeError("ElevenLabs returned empty audio")
+    return bytes(pcm)
+
+
+def preload_thinking_sounds(el: Optional[ElevenLabs]):
+    """
+    Pre-generate all thinking sounds and ack phrases at startup.
+    This avoids rate limiting and network latency during conversation.
+    """
+    global THINKING_SOUNDS_CACHE
+    
+    if not el:
+        print("⚠️  ElevenLabs not available - thinking sounds will use offline TTS")
+        return
+    
+    all_phrases = (
+        THINKING_PHRASES_HR + 
+        THINKING_PHRASES_EN + 
+        ACK_PHRASES_HR + 
+        ACK_PHRASES_EN
+    )
+    
+    # Remove duplicates
+    unique_phrases = list(set(all_phrases))
+    
+    print(f"🔊 Pre-generating {len(unique_phrases)} thinking sounds (this takes ~{len(unique_phrases)*0.5:.0f}s)...")
+    
+    success_count = 0
+    for i, phrase in enumerate(unique_phrases, 1):
+        try:
+            pcm = elevenlabs_tts_pcm_bytes(el, phrase)
+            THINKING_SOUNDS_CACHE[phrase] = pcm
+            success_count += 1
+            # Progress indicator
+            if i % 3 == 0 or i == len(unique_phrases):
+                print(f"  ... {i}/{len(unique_phrases)} cached", end="\r")
+        except Exception as e:
+            print(f"\n⚠️  Failed to cache '{phrase}': {e}")
+    
+    print(f"\n✓ Cached {success_count}/{len(unique_phrases)} thinking sounds")
+    
+    if success_count < len(unique_phrases):
+        print("  (Failed sounds will fall back to offline TTS)")
+
+
+def play_cached_sound(out: "OutputAudio", phrase: str, lang_hint: Optional[str] = None) -> bool:
+    """
+    Play a pre-cached thinking sound. Returns True if cached version was played,
+    False if not cached (caller should use fallback).
+    """
+    pcm = THINKING_SOUNDS_CACHE.get(phrase)
+    if pcm:
+        out.write_int16_bytes(pcm)
+        return True
+    
+    # Fallback to offline TTS if not cached
+    tts_offline_pyttsx3(phrase, lang_hint)
+    return False
+
+
+# =========================
 # ASR (in-memory) — faster-whisper
 # =========================
 
@@ -457,34 +568,36 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
 # LLM streaming utilities
 # =========================
 
-_SENT_END_RE = re.compile(r"[\.!\?…]\s+$")
+_SENT_END_RE = re.compile(r"[\.!\?…]")
 
 
 def stream_text_segments(llm: "LLMClient", messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
     """Stream tokens from the LLM and release speech-sized segments ASAP."""
-
+    
     buf: list[str] = []
     last_flush = time.time()
+    
     for token in llm.stream_text(messages, temperature=temperature, max_tokens=max_tokens):
         if not token:
             continue
         buf.append(token)
         joined = "".join(buf)
         now = time.time()
-        should_flush = False
-
+        
+        # Ultra-aggressive flushing
         if _SENT_END_RE.search(joined):
-            should_flush = True
-        elif len(joined) >= STREAMING_MIN_CHARS:
-            should_flush = True
-        elif (now - last_flush) >= STREAMING_MAX_WAIT and joined.strip():
-            should_flush = True
-
-        if should_flush:
             yield joined
             buf.clear()
             last_flush = now
-
+        elif len(joined) >= STREAMING_MIN_CHARS:
+            yield joined
+            buf.clear()
+            last_flush = now
+        elif (now - last_flush >= STREAMING_MAX_WAIT) and joined.strip():
+            yield joined
+            buf.clear()
+            last_flush = now
+    
     if buf:
         yield "".join(buf)
 
@@ -546,8 +659,8 @@ def tts_elevenlabs_stream_to_output(el: ElevenLabs, text: str, out: OutputAudio)
     """
     audio_gen = el.text_to_speech.convert(
         voice_id=ELEVENLABS_VOICE_ID,
-        optimize_streaming_latency=str(ELEVEN_STREAM_LATENCY),  # "0".."4"
-        output_format="pcm_16000",   # raw 16kHz PCM
+        optimize_streaming_latency=str(ELEVEN_STREAM_LATENCY),
+        output_format="pcm_16000",
         text=text,
         model_id="eleven_multilingual_v2",
     )
@@ -688,8 +801,8 @@ class Memory:
     """
     def __init__(self, llm: "LLMClient"):
         self.llm = llm
-        self.summary = ""           # long-term compressed memory
-        self.window = []            # recent messages: [{'role':'user'|'assistant','content':...}, ...]
+        self.summary = ""
+        self.window = []
         self.user_turns_since_summary = 0
 
     def add_user(self, content: str):
@@ -757,7 +870,6 @@ class ContinuousListener:
     def __init__(self):
         self.device_index = pick_input_device(PREFERRED_INPUT_NAME, INPUT_DEVICE_INDEX)
         self.dev_info = sd.query_devices(self.device_index)
-        # Force capture at TARGET_SR (skips resampling later if supported)
         self.device_sr = TARGET_SR
 
     def record_utterance(self):
@@ -772,7 +884,6 @@ class ContinuousListener:
         def callback(indata, frames, time_info, status):
             nonlocal last_above, started_speaking
             if status:
-                # Don't spam; print once per state
                 print(status, file=sys.stderr)
             mono = indata.copy().reshape(-1)
             rms = float(np.sqrt(np.mean(mono**2)) + 1e-12)
@@ -861,6 +972,9 @@ def main():
 
         try:
             el = init_elevenlabs()
+            # Pre-cache thinking sounds after ElevenLabs init
+            if USE_THINKING_SOUNDS or USE_INSTANT_ACK:
+                preload_thinking_sounds(el)
         except Exception as e:
             print("ElevenLabs init warning:", e)
             print("Proceeding with offline TTS only.")
@@ -868,15 +982,16 @@ def main():
         mem = Memory(llm)
         executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
-    # Persistent audio output to reduce latency
     out = OutputAudio(samplerate=TARGET_SR, channels=1)
-
     listener = ContinuousListener()
 
     print("\nBilingual voice agent ready. (HR/EN)")
     print("Tips:")
     print("- Speak naturally; a short pause ends your turn.")
     print("- Lower RMS_THRESH in .env if it misses quiet speech (e.g. 0.002).")
+    if USE_THINKING_SOUNDS:
+        cached_count = len(THINKING_SOUNDS_CACHE)
+        print(f"- Thinking sounds enabled ({cached_count} phrases cached for instant playback)")
     if WAKE_WORD:
         print(f"- Wake word enabled: say \"{WAKE_WORD}\" to start a turn.")
 
@@ -884,6 +999,7 @@ def main():
         while True:
             try:
                 tracker = LatencyTracker()
+                
                 # 1) Capture one utterance
                 with tracker.track("capture"):
                     wav_buf = listener.record_utterance()
@@ -948,19 +1064,58 @@ def main():
                 flag = "🇭🇷" if (lang or "").startswith("hr") else "🇬🇧"
                 print(f"{flag} You: {user_text}")
 
+                # 2b) Instant acknowledgment (optional) - uses cache
+                if USE_INSTANT_ACK and executor:
+                    ack_phrase = get_ack_phrase(lang)
+                    executor.submit(play_cached_sound, out, ack_phrase, lang)
+
                 # 3) Build contextful prompt with memory
                 with tracker.track("memory+prompt"):
                     mem.add_user(user_text)
                     messages = mem.build_prompt(user_lang_hint=lang)
 
-                # 4) LLM reply — stream sentences and speak each sentence immediately
+                # 4) LLM reply with perceptual optimizations
                 assistant_text_parts = []
                 print("🤖 Assistant: ", end="", flush=True)
+                
+                # Thinking sound for perceived responsiveness - uses CACHE
+                thinking_future = None
+                if USE_THINKING_SOUNDS and executor:
+                    thinking_phrase = get_thinking_phrase(lang)
+                    print(thinking_phrase, end=" ", flush=True)
+                    thinking_future = executor.submit(
+                        play_cached_sound,
+                        out,
+                        thinking_phrase,
+                        lang,
+                    )
+                
                 with tracker.track("llm_stream+tts"):
                     future_tts: Optional[concurrent.futures.Future] = None
+                    first_chunk = True
+                    llm_start_time = time.time()
+                    gave_slow_warning = False
+                    
                     for sent in stream_text_segments(llm, messages):
+                        # Wait for thinking sound to finish on first chunk
+                        if first_chunk and thinking_future:
+                            try:
+                                thinking_future.result(timeout=0.6)
+                            except Exception:
+                                pass
+                            first_chunk = False
+                        
+                        # Slow response warning
+                        elapsed = time.time() - llm_start_time
+                        if elapsed > SLOW_RESPONSE_THRESHOLD and not gave_slow_warning and not assistant_text_parts:
+                            slow_phrase = "Samo trenutak..." if (lang or "").startswith("hr") else "Just a moment..."
+                            if executor and el:
+                                executor.submit(say_sentence_with_fallback, el, out, slow_phrase, lang)
+                            gave_slow_warning = True
+                        
                         print(sent, end="", flush=True)
                         assistant_text_parts.append(sent)
+                        
                         if executor is None:
                             say_sentence_with_fallback(el, out, sent, lang)
                             continue
@@ -975,14 +1130,15 @@ def main():
                         )
                     if future_tts is not None:
                         future_tts.result()
-                print()  # newline
+                
+                print()
                 assistant_text = "".join(assistant_text_parts)
 
                 # 5) Add to memory
                 with tracker.track("memory_update"):
                     mem.add_assistant(assistant_text)
 
-                # 5b) Summarize in background (non-blocking)
+                # 5b) Summarize in background
                 def _bg_sum():
                     try:
                         mem.maybe_summarize()
@@ -1091,7 +1247,6 @@ class RemoteAgentClient:
             if resp.status_code in (401, 403):
                 raise RuntimeError("Remote agent authentication failed")
             if resp.status_code in (404, 410):
-                # Session expired — request a new one and retry
                 self.session_id = None
                 continue
             resp.raise_for_status()

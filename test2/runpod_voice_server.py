@@ -4,6 +4,8 @@ Run this on RunPod (or any GPU host) and point REMOTE_AGENT_URL from the
 voice_agent.py client to this server. The server keeps per-session memory so the
 conversation stays coherent across turns. Audio is exchanged as 16 kHz mono WAV
 (PCM16) payloads to keep latency low.
+
+VERSION: 2025-10-19-cached (with thinking sounds cache)
 """
 
 import base64
@@ -11,6 +13,7 @@ import io
 import os
 import threading
 import uuid
+import random
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -76,6 +79,21 @@ CHANNELS = 1
 
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
 SERVER_AUTH_TOKEN = os.getenv("REMOTE_SERVER_AUTH_TOKEN", "").strip() or None
+
+# Thinking sounds (NEW)
+THINKING_PHRASES_HR = ["Hmm,", "Pa,", "Dobro,", "Hm, vidimo,", "Aha,", "Dakle,"]
+THINKING_PHRASES_EN = ["Hmm,", "Well,", "Let me think,", "Okay,", "Right,", "So,"]
+
+def _env_truthy(value: Optional[str], default: bool = False) -> bool:
+    if value is None:
+        return default
+    return value.strip().lower() in {"1", "true", "yes", "on"}
+
+USE_THINKING_SOUNDS = _env_truthy(os.getenv("USE_THINKING_SOUNDS"), True)
+ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "0")
+
+# Global cache for thinking sounds
+THINKING_SOUNDS_CACHE: Dict[str, bytes] = {}
 
 app = FastAPI(title="Bilingual Voice Agent GPU Server")
 app.add_middleware(
@@ -248,9 +266,10 @@ def get_llm_client(api_key_override: Optional[str]) -> LLMClient:
 
 
 def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
+    """Generate PCM16 audio from ElevenLabs."""
     audio_gen = el.text_to_speech.convert(
         voice_id=ELEVENLABS_VOICE_ID,
-        optimize_streaming_latency="2",
+        optimize_streaming_latency=str(ELEVEN_STREAM_LATENCY),
         output_format="pcm_16000",
         text=text,
         model_id="eleven_multilingual_v2",
@@ -264,6 +283,46 @@ def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
     return bytes(pcm)
 
 
+def get_thinking_phrase(lang: Optional[str]) -> str:
+    """Get random thinking phrase based on language."""
+    phrases = THINKING_PHRASES_HR if (lang or "").startswith("hr") else THINKING_PHRASES_EN
+    return random.choice(phrases)
+
+
+def preload_thinking_sounds(el: Optional[ElevenLabs]):
+    """Pre-generate all thinking sounds at startup."""
+    global THINKING_SOUNDS_CACHE
+    
+    if not el:
+        print("⚠️  ElevenLabs not available - thinking sounds disabled on server")
+        return
+    
+    unique_phrases = list(set(THINKING_PHRASES_HR + THINKING_PHRASES_EN))
+    
+    print(f"🔊 Pre-generating {len(unique_phrases)} thinking sounds on server...")
+    
+    success_count = 0
+    for i, phrase in enumerate(unique_phrases, 1):
+        try:
+            pcm = elevenlabs_tts_pcm(el, phrase)
+            THINKING_SOUNDS_CACHE[phrase] = pcm
+            success_count += 1
+            if i % 3 == 0 or i == len(unique_phrases):
+                print(f"  ... {i}/{len(unique_phrases)} cached", end="\r")
+        except Exception as e:
+            print(f"\n⚠️  Failed to cache '{phrase}': {e}")
+    
+    print(f"\n✓ Server cached {success_count}/{len(unique_phrases)} thinking sounds")
+
+
+def get_cached_thinking_sound(lang: Optional[str]) -> Optional[bytes]:
+    """Get a cached thinking sound, or None if not available."""
+    if not THINKING_SOUNDS_CACHE:
+        return None
+    phrase = get_thinking_phrase(lang)
+    return THINKING_SOUNDS_CACHE.get(phrase)
+
+
 @dataclass
 class SessionState:
     memory: Memory
@@ -275,6 +334,11 @@ class SessionState:
 
 whisper_model = load_whisper()
 eleven_client = init_elevenlabs()
+
+# Preload thinking sounds cache
+if USE_THINKING_SOUNDS and eleven_client:
+    preload_thinking_sounds(eleven_client)
+
 sessions: Dict[str, SessionState] = {}
 
 
@@ -369,11 +433,23 @@ async def process_turn(
         state.last_lang = lang or state.last_lang
         state.turns += 1
 
+    # Generate TTS audio with thinking sound prepended
     audio_b64 = None
     if eleven_client:
         try:
-            pcm_bytes = elevenlabs_tts_pcm(eleven_client, assistant_text)
-            audio_b64 = base64.b64encode(pcm_bytes).decode("ascii")
+            # Prepend cached thinking sound if available
+            thinking_pcm = b""
+            if USE_THINKING_SOUNDS:
+                cached = get_cached_thinking_sound(lang)
+                if cached:
+                    thinking_pcm = cached
+            
+            # Generate main response
+            response_pcm = elevenlabs_tts_pcm(eleven_client, assistant_text)
+            
+            # Combine thinking + response
+            combined_pcm = thinking_pcm + response_pcm
+            audio_b64 = base64.b64encode(combined_pcm).decode("ascii")
         except Exception as exc:
             print("TTS error:", exc)
 

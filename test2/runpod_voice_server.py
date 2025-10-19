@@ -1,11 +1,6 @@
 """FastAPI server that runs the bilingual voice agent pipeline on a GPU backend.
 
-Run this on RunPod (or any GPU host) and point REMOTE_AGENT_URL from the
-voice_agent.py client to this server. The server keeps per-session memory so the
-conversation stays coherent across turns. Audio is exchanged as 16 kHz mono WAV
-(PCM16) payloads to keep latency low.
-
-VERSION: 2025-10-19-cached (with thinking sounds cache)
+VERSION: 2025-10-19-instant (instant thinking sounds via streaming)
 """
 
 import base64
@@ -20,6 +15,7 @@ from typing import Dict, Optional
 import numpy as np
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Header
+from fastapi.responses import StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 from openai import OpenAI
@@ -33,32 +29,21 @@ install_exception_logging("runpod_voice_server")
 log_startup_diagnostics("runpod_voice_server")
 
 def ensure_hf_transfer_optional():
-    """Disable the Hugging Face fast-transfer path if the package is missing."""
-
     enable_fast = os.getenv("HF_HUB_ENABLE_HF_TRANSFER", "").strip()
     if not enable_fast:
         return
-
     truthy = {"1", "true", "yes", "on"}
     if enable_fast.lower() not in truthy:
         return
-
     try:
         __import__("hf_transfer")
     except ModuleNotFoundError:
-        print(
-            "HF_HUB_ENABLE_HF_TRANSFER is set but hf_transfer is not installed. "
-            "Falling back to the standard downloader."
-        )
+        print("HF_HUB_ENABLE_HF_TRANSFER is set but hf_transfer is not installed.")
         os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-
 
 ensure_hf_transfer_optional()
 
-# =========================
-# Config (mirrors voice_agent.py)
-# =========================
-
+# Config
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vFQACl5nAIV0owAavYxE")
@@ -80,7 +65,6 @@ CHANNELS = 1
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
 SERVER_AUTH_TOKEN = os.getenv("REMOTE_SERVER_AUTH_TOKEN", "").strip() or None
 
-# Thinking sounds (NEW)
 THINKING_PHRASES_HR = ["Hmm,", "Pa,", "Dobro,", "Hm, vidimo,", "Aha,", "Dakle,"]
 THINKING_PHRASES_EN = ["Hmm,", "Well,", "Let me think,", "Okay,", "Right,", "So,"]
 
@@ -92,7 +76,6 @@ def _env_truthy(value: Optional[str], default: bool = False) -> bool:
 USE_THINKING_SOUNDS = _env_truthy(os.getenv("USE_THINKING_SOUNDS"), True)
 ELEVEN_STREAM_LATENCY = os.getenv("ELEVEN_STREAM_LATENCY", "0")
 
-# Global cache for thinking sounds
 THINKING_SOUNDS_CACHE: Dict[str, bytes] = {}
 
 app = FastAPI(title="Bilingual Voice Agent GPU Server")
@@ -104,11 +87,6 @@ app.add_middleware(
     allow_headers=["*"]
 )
 
-# =========================
-# Utilities shared with voice_agent
-# =========================
-
-
 def load_whisper():
     kwargs = dict(
         device=WHISPER_DEVICE,
@@ -118,7 +96,6 @@ def load_whisper():
     )
     model = WhisperModel(WHISPER_MODEL, **kwargs)
     
-    # GPU warmup
     if WHISPER_DEVICE == "cuda":
         print("Warming up GPU...")
         dummy = np.zeros(16000, dtype=np.float32)
@@ -130,7 +107,6 @@ def load_whisper():
     
     return model
 
-
 def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
     if src_sr == TARGET_SR:
         return audio_np
@@ -138,9 +114,7 @@ def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
     if target_len <= 0:
         return np.zeros(1, dtype=np.float32)
     from scipy.signal import resample
-
     return resample(audio_np, target_len).astype(np.float32)
-
 
 def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     if wav_buf.getbuffer().nbytes < 32000:
@@ -170,9 +144,7 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     lang = getattr(info, "language", None)
     return text, lang
 
-
 llm_clients: Dict[str, "LLMClient"] = {}
-
 
 class LLMClient:
     def __init__(self, api_key: str):
@@ -193,7 +165,6 @@ class LLMClient:
             params["max_tokens"] = max_tokens
         resp = self.client.chat.completions.create(**params)
         return resp.choices[0].message.content.strip()
-
 
 class Memory:
     def __init__(self, llm: LLMClient):
@@ -249,12 +220,10 @@ class Memory:
         msgs.extend(self.window)
         return msgs
 
-
 def init_elevenlabs() -> Optional[ElevenLabs]:
     if not ELEVENLABS_API_KEY:
         return None
     return ElevenLabs(api_key=ELEVENLABS_API_KEY)
-
 
 def get_llm_client(api_key_override: Optional[str]) -> LLMClient:
     key = (api_key_override or DEFAULT_OPENAI_API_KEY).strip()
@@ -264,9 +233,7 @@ def get_llm_client(api_key_override: Optional[str]) -> LLMClient:
         llm_clients[key] = LLMClient(key)
     return llm_clients[key]
 
-
 def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
-    """Generate PCM16 audio from ElevenLabs."""
     audio_gen = el.text_to_speech.convert(
         voice_id=ELEVENLABS_VOICE_ID,
         optimize_streaming_latency=str(ELEVEN_STREAM_LATENCY),
@@ -282,15 +249,11 @@ def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
         raise RuntimeError("ElevenLabs returned empty audio")
     return bytes(pcm)
 
-
 def get_thinking_phrase(lang: Optional[str]) -> str:
-    """Get random thinking phrase based on language."""
     phrases = THINKING_PHRASES_HR if (lang or "").startswith("hr") else THINKING_PHRASES_EN
     return random.choice(phrases)
 
-
 def preload_thinking_sounds(el: Optional[ElevenLabs]):
-    """Pre-generate all thinking sounds at startup."""
     global THINKING_SOUNDS_CACHE
     
     if not el:
@@ -314,14 +277,11 @@ def preload_thinking_sounds(el: Optional[ElevenLabs]):
     
     print(f"\n✓ Server cached {success_count}/{len(unique_phrases)} thinking sounds")
 
-
 def get_cached_thinking_sound(lang: Optional[str]) -> Optional[bytes]:
-    """Get a cached thinking sound, or None if not available."""
     if not THINKING_SOUNDS_CACHE:
         return None
     phrase = get_thinking_phrase(lang)
     return THINKING_SOUNDS_CACHE.get(phrase)
-
 
 @dataclass
 class SessionState:
@@ -331,21 +291,17 @@ class SessionState:
     turns: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
-
 whisper_model = load_whisper()
 eleven_client = init_elevenlabs()
 
-# Preload thinking sounds cache
 if USE_THINKING_SOUNDS and eleven_client:
     preload_thinking_sounds(eleven_client)
 
 sessions: Dict[str, SessionState] = {}
 
-
 def require_auth(x_auth: Optional[str] = Header(None)):
     if SERVER_AUTH_TOKEN and x_auth != SERVER_AUTH_TOKEN:
         raise HTTPException(status_code=401, detail="Invalid auth token")
-
 
 def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> tuple[str, SessionState]:
     llm_client = get_llm_client(api_key_override)
@@ -360,11 +316,9 @@ def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> t
     state = sessions[session_id]
     return session_id, state
 
-
 @app.get("/healthz")
 def healthz():
     return {"status": "ok"}
-
 
 @app.post("/api/session")
 def create_session(
@@ -377,7 +331,6 @@ def create_session(
         raise HTTPException(status_code=500, detail=str(exc))
     return {"session_id": session_id}
 
-
 @app.post("/api/process")
 async def process_turn(
     audio: UploadFile = File(...),
@@ -386,6 +339,7 @@ async def process_turn(
     x_openai_key: Optional[str] = Header(None),
     openai_api_key: Optional[str] = Form(None),
 ):
+    """Original single-response endpoint - kept for backwards compatibility."""
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio payload")
@@ -433,21 +387,17 @@ async def process_turn(
         state.last_lang = lang or state.last_lang
         state.turns += 1
 
-    # Generate TTS audio with thinking sound prepended
+    # Generate TTS with thinking sound prepended
     audio_b64 = None
     if eleven_client:
         try:
-            # Prepend cached thinking sound if available
             thinking_pcm = b""
             if USE_THINKING_SOUNDS:
                 cached = get_cached_thinking_sound(lang)
                 if cached:
                     thinking_pcm = cached
             
-            # Generate main response
             response_pcm = elevenlabs_tts_pcm(eleven_client, assistant_text)
-            
-            # Combine thinking + response
             combined_pcm = thinking_pcm + response_pcm
             audio_b64 = base64.b64encode(combined_pcm).decode("ascii")
         except Exception as exc:
@@ -462,9 +412,102 @@ async def process_turn(
         "tts_sample_rate": TARGET_SR,
     }
 
+@app.post("/api/process_instant")
+async def process_turn_instant(
+    audio: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    _: None = Depends(require_auth),
+    x_openai_key: Optional[str] = Header(None),
+    openai_api_key: Optional[str] = Form(None),
+):
+    """
+    NEW: Instant response endpoint with thinking sound sent immediately.
+    Returns JSON-lines stream:
+    1. {"type": "thinking", "audio_b64": "...", "lang": "hr"}  ← INSTANT
+    2. {"type": "response", "text": "...", "audio_b64": "...", "assistant_text": "..."}
+    """
+    import json
+    
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio payload")
+
+    api_key_override = openai_api_key or x_openai_key
+    
+    async def generate():
+        try:
+            session_id_final, state = get_session(session_id, api_key_override)
+        except RuntimeError as exc:
+            yield f'{{"type": "error", "message": "{str(exc)}"}}\n'
+            return
+
+        wav_buf = io.BytesIO(audio_bytes)
+        user_text, lang = whisper_transcribe(whisper_model, wav_buf)
+
+        # 1. INSTANT thinking sound (immediately after transcription)
+        if USE_THINKING_SOUNDS and THINKING_SOUNDS_CACHE:
+            thinking_pcm = get_cached_thinking_sound(lang)
+            if thinking_pcm:
+                thinking_b64 = base64.b64encode(thinking_pcm).decode("ascii")
+                yield json.dumps({
+                    "type": "thinking",
+                    "audio_b64": thinking_b64,
+                    "lang": lang,
+                    "sample_rate": TARGET_SR,
+                }) + "\n"
+
+        # Check wake word
+        if WAKE_WORD:
+            cleaned = user_text.lower().strip()
+            if not cleaned.startswith(WAKE_WORD.lower()):
+                yield json.dumps({
+                    "type": "skipped",
+                    "reason": "wake_word_missing",
+                    "text": user_text,
+                    "session_id": session_id_final,
+                }) + "\n"
+                return
+            user_text = user_text[len(WAKE_WORD):].lstrip(" ,.-:") or "Hej!"
+
+        if not user_text:
+            yield json.dumps({
+                "type": "empty",
+                "session_id": session_id_final,
+            }) + "\n"
+            return
+
+        # 2. Generate LLM response + TTS (slow part)
+        with state.lock:
+            state.memory.add_user(user_text)
+            messages = state.memory.build_prompt(lang)
+            assistant_text = state.memory.llm.complete(messages)
+            state.memory.add_assistant(assistant_text)
+            state.memory.maybe_summarize()
+            state.last_lang = lang or state.last_lang
+            state.turns += 1
+
+        response_audio_b64 = None
+        if eleven_client:
+            try:
+                response_pcm = elevenlabs_tts_pcm(eleven_client, assistant_text)
+                response_audio_b64 = base64.b64encode(response_pcm).decode("ascii")
+            except Exception as exc:
+                print("TTS error:", exc)
+
+        # 3. Send main response
+        yield json.dumps({
+            "type": "response",
+            "session_id": session_id_final,
+            "text": user_text,
+            "lang": lang or state.last_lang,
+            "assistant_text": assistant_text,
+            "audio_b64": response_audio_b64,
+            "sample_rate": TARGET_SR,
+        }) + "\n"
+
+    return StreamingResponse(generate(), media_type="application/x-ndjson")
 
 if __name__ == "__main__":
     import uvicorn
-
     port = int(os.getenv("PORT", "8000"))
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -6,8 +6,8 @@
 # - ElevenLabs TTS streamed to speakers (pcm_16000)
 # - Offline TTS fallback (pyttsx3) when ElevenLabs is unavailable
 # - Conversation memory: rolling history + auto summary compression (background)
-# - Perceptual speed optimizations: thinking sounds (CACHED), instant acknowledgment
-# Version: 2025-10-19-cached
+# - Perceptual speed optimizations: INSTANT thinking sounds via streaming
+# Version: 2025-10-19-instant-complete
 
 import os
 import io
@@ -21,6 +21,7 @@ import base64
 import contextlib
 import concurrent.futures
 import random
+import json
 from dataclasses import dataclass
 from typing import Optional, Dict
 import numpy as np
@@ -137,6 +138,7 @@ if not REMOTE_AGENT_OPENAI_KEY:
 if not REMOTE_AGENT_OPENAI_KEY:
     REMOTE_AGENT_OPENAI_KEY = None
 
+REMOTE_USE_INSTANT_ENDPOINT = _env_truthy(os.getenv("REMOTE_USE_INSTANT_ENDPOINT"), True)
 
 # Optional offline TTS
 try:
@@ -963,6 +965,8 @@ def main():
         )
         if REMOTE_AGENT_OPENAI_KEY:
             print("Forwarding OpenAI API key to remote agent server.")
+        if REMOTE_USE_INSTANT_ENDPOINT:
+            print("✨ Using instant thinking sounds endpoint (streaming)")
     else:
         llm = LLMClient()
         if not asr_url:
@@ -990,8 +994,11 @@ def main():
     print("- Speak naturally; a short pause ends your turn.")
     print("- Lower RMS_THRESH in .env if it misses quiet speech (e.g. 0.002).")
     if USE_THINKING_SOUNDS:
-        cached_count = len(THINKING_SOUNDS_CACHE)
-        print(f"- Thinking sounds enabled ({cached_count} phrases cached for instant playback)")
+        if remote_client and REMOTE_USE_INSTANT_ENDPOINT:
+            print("- Thinking sounds enabled (instant via streaming)")
+        else:
+            cached_count = len(THINKING_SOUNDS_CACHE)
+            print(f"- Thinking sounds enabled ({cached_count} phrases cached for instant playback)")
     if WAKE_WORD:
         print(f"- Wake word enabled: say \"{WAKE_WORD}\" to start a turn.")
 
@@ -1010,11 +1017,15 @@ def main():
                 if remote_client:
                     try:
                         with tracker.track("remote_agent"):
-                            result = remote_client.process(wav_buf)
+                            if REMOTE_USE_INSTANT_ENDPOINT:
+                                result = remote_client.process_instant(wav_buf, out, tracker)
+                            else:
+                                result = remote_client.process(wav_buf)
                     except Exception as e:
                         print("Remote agent error:", e)
                         tracker.report()
                         continue
+                    
                     if not result or not result.user_text:
                         tracker.report("⏱️ Turn skipped (remote empty)")
                         continue
@@ -1023,11 +1034,14 @@ def main():
                             print(f"(Ignored — missing wake word '{WAKE_WORD}')")
                         tracker.report("⏱️ Turn skipped (wake word)")
                         continue
+                    
                     flag = "🇭🇷" if (result.lang or "").startswith("hr") else "🇬🇧"
                     print(f"{flag} You: {result.user_text}")
                     print("🤖 Assistant: ", end="", flush=True)
                     print(result.assistant_text)
-                    if result.audio_pcm16:
+                    
+                    # For instant endpoint, audio already played during streaming
+                    if not REMOTE_USE_INSTANT_ENDPOINT and result.audio_pcm16:
                         with tracker.track("playback"):
                             if result.sample_rate != TARGET_SR:
                                 pcm = np.frombuffer(result.audio_pcm16, dtype=np.int16).astype(np.float32) / 32768.0
@@ -1035,8 +1049,7 @@ def main():
                                 out.write_float_np(pcm_16k)
                             else:
                                 out.write_int16_bytes(result.audio_pcm16)
-                    else:
-                        print("(Remote agent returned no audio — skipping playback)")
+                    
                     tracker.report()
                     continue
 
@@ -1226,6 +1239,7 @@ class RemoteAgentClient:
         self.session_id = sid
 
     def process(self, wav_buf: io.BytesIO) -> Optional[RemoteAgentResult]:
+        """Original single-response endpoint."""
         payload = wav_buf.getvalue()
         if not payload:
             return None
@@ -1274,6 +1288,103 @@ class RemoteAgentClient:
                 reason=body.get("reason"),
             )
         raise RuntimeError("Remote agent unavailable after retries")
+
+    def process_instant(self, wav_buf: io.BytesIO, out: OutputAudio, tracker: LatencyTracker) -> Optional[RemoteAgentResult]:
+        """
+        NEW: Instant endpoint with streaming thinking sounds.
+        Plays thinking sound immediately, then response audio.
+        """
+        payload = wav_buf.getvalue()
+        if not payload:
+            return None
+        
+        self.ensure_session()
+        files = {"audio": ("audio.wav", payload, "audio/wav")}
+        data = {"session_id": self.session_id}
+        if self.openai_api_key:
+            data["openai_api_key"] = self.openai_api_key
+        
+        resp = self.session.post(
+            f"{self.base_url}/process_instant",
+            headers=self._headers(),
+            files=files,
+            data=data,
+            timeout=HTTP_TIMEOUT,
+            stream=True,
+        )
+        
+        if resp.status_code in (401, 403):
+            raise RuntimeError("Remote agent authentication failed")
+        resp.raise_for_status()
+        
+        user_text = ""
+        assistant_text = ""
+        lang = None
+        skipped = False
+        reason = None
+        
+        thinking_played = False
+        response_start = None
+        
+        # Parse JSON-lines stream
+        for line in resp.iter_lines():
+            if not line:
+                continue
+            try:
+                msg = json.loads(line)
+            except Exception:
+                continue
+            
+            msg_type = msg.get("type")
+            
+            if msg_type == "thinking":
+                # INSTANT thinking sound - play immediately!
+                with tracker.track("thinking_sound"):
+                    thinking_b64 = msg.get("audio_b64")
+                    if thinking_b64:
+                        thinking_audio = base64.b64decode(thinking_b64)
+                        out.write_int16_bytes(thinking_audio)
+                        thinking_played = True
+                        print("🤔 ", end="", flush=True)
+            
+            elif msg_type == "response":
+                if not response_start:
+                    response_start = time.time()
+                user_text = msg.get("text", "")
+                assistant_text = msg.get("assistant_text", "")
+                lang = msg.get("lang")
+                session_id = msg.get("session_id")
+                if session_id:
+                    self.session_id = session_id
+                
+                # Play response audio immediately
+                with tracker.track("response_audio"):
+                    audio_b64 = msg.get("audio_b64")
+                    if audio_b64:
+                        response_audio = base64.b64decode(audio_b64)
+                        out.write_int16_bytes(response_audio)
+            
+            elif msg_type == "skipped":
+                skipped = True
+                reason = msg.get("reason")
+                user_text = msg.get("text", "")
+            
+            elif msg_type == "empty":
+                session_id = msg.get("session_id")
+                if session_id:
+                    self.session_id = session_id
+                return None
+        
+        return RemoteAgentResult(
+            user_text=user_text,
+            assistant_text=assistant_text,
+            lang=lang,
+            audio_pcm16=b"",  # Already played during streaming
+            sample_rate=TARGET_SR,
+            session_id=self.session_id,
+            skipped=skipped,
+            reason=reason,
+        )
 
 
 if __name__ == "__main__":

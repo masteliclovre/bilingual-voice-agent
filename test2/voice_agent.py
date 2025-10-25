@@ -1,12 +1,14 @@
 # voice_agent.py
-# Continuous bilingual (HR/EN) voice agent — low-latency edition
+# Continuous bilingual (HR/EN) voice agent — low-latency edition with audio feedback
 # - Always-listening RMS VAD turn-taking (no click)
 # - Local transcription (faster-whisper) — in-memory (no temp WAV)
 # - OpenAI or Groq streaming for reasoning (speak sentence-by-sentence)
 # - ElevenLabs TTS streamed to speakers (pcm_16000)
+# - Audio feedback: beep + "mhm" during LLM thinking time
 # - Offline TTS fallback (pyttsx3) when ElevenLabs is unavailable
 # - Conversation memory: rolling history + auto summary compression (background)
-# Version: 2025-09-16
+# - Enhanced latency diagnostics
+# Version: 2025-10-25
 
 import os
 import io
@@ -172,6 +174,10 @@ MIN_SPEECH_SECS = float(os.getenv("MIN_SPEECH_SECS", "0.3"))
 RMS_THRESH = float(os.getenv("RMS_THRESH", "0.003"))  # lower (e.g. 0.002) if your mic is quiet
 RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.12"))
 
+# Audio feedback configuration
+BEEP_DELAY_MS = int(os.getenv("BEEP_DELAY_MS", "400"))  # delay after utterance end
+AFFIRMATIVE_DELAY_MS = int(os.getenv("AFFIRMATIVE_DELAY_MS", "200"))  # delay after beep
+
 # OpenAI
 OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 GROQ_API_KEY = os.getenv("GROQ_API_KEY", "")
@@ -234,6 +240,55 @@ def _get_shared_http_session() -> requests.Session:
     return _shared_http_session
 
 # =========================
+# Audio Feedback Utilities
+# =========================
+
+def generate_beep_pcm(frequency=800, duration_ms=150, sample_rate=TARGET_SR):
+    """Generate a simple beep tone as PCM float32."""
+    duration_sec = duration_ms / 1000.0
+    samples = int(sample_rate * duration_sec)
+    t = np.linspace(0, duration_sec, samples, False)
+    # Simple sine wave
+    tone = np.sin(2 * np.pi * frequency * t).astype(np.float32)
+    # Apply envelope to avoid clicks
+    envelope = np.ones_like(tone)
+    fade_samples = int(sample_rate * 0.01)  # 10ms fade
+    envelope[:fade_samples] = np.linspace(0, 1, fade_samples)
+    envelope[-fade_samples:] = np.linspace(1, 0, fade_samples)
+    return tone * envelope * 0.3  # reduce volume
+
+# Pre-generate beep sound
+BEEP_SOUND = generate_beep_pcm()
+
+# Croatian affirmative sounds (simple phonemes)
+def generate_mhm_sound(sample_rate=TARGET_SR):
+    """Generate a simple 'mhm' affirmative sound."""
+    # Simple two-tone hum
+    duration_sec = 0.3
+    samples = int(sample_rate * duration_sec)
+    t = np.linspace(0, duration_sec, samples, False)
+    
+    # Two tones for "m-hm" effect
+    freq1 = 200  # lower hum
+    freq2 = 250  # slightly higher
+    
+    # First half and second half
+    mid = samples // 2
+    tone = np.zeros(samples, dtype=np.float32)
+    tone[:mid] = np.sin(2 * np.pi * freq1 * t[:mid])
+    tone[mid:] = np.sin(2 * np.pi * freq2 * t[mid:])
+    
+    # Envelope
+    envelope = np.ones_like(tone)
+    fade_samples = int(sample_rate * 0.02)
+    envelope[:fade_samples] = np.linspace(0, 1, fade_samples)
+    envelope[-fade_samples:] = np.linspace(1, 0, fade_samples)
+    
+    return tone * envelope * 0.2
+
+MHM_SOUND = generate_mhm_sound()
+
+# =========================
 # Utilities
 # =========================
 
@@ -286,10 +341,11 @@ def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
 
 
 class LatencyTracker:
-    """Context manager helper for per-turn latency accounting."""
+    """Enhanced context manager for detailed per-turn latency accounting."""
 
     def __init__(self):
         self.events: list[tuple[str, float]] = []
+        self.turn_start = time.perf_counter()
 
     @contextlib.contextmanager
     def track(self, label: str):
@@ -305,19 +361,59 @@ class LatencyTracker:
 
     def clear(self):
         self.events.clear()
+        self.turn_start = time.perf_counter()
 
     def report(self, title: str = "⏱️ Latency breakdown"):
         if not self.events:
             return
-        total = sum(d for _, d in self.events)
-        if total <= 0:
-            return
+        
+        total_turn = time.perf_counter() - self.turn_start
+        sum_tracked = sum(d for _, d in self.events)
+        untracked = max(0.0, total_turn - sum_tracked)
+        
         print()
+        print("=" * 60)
         print(title)
+        print("=" * 60)
+        
         for label, duration in self.events:
-            pct = (duration / total * 100.0) if total else 0.0
-            print(f"  • {label:<18} {duration * 1000:7.1f} ms ({pct:4.1f}%)")
-        print(f"  • {'total':<18} {total * 1000:7.1f} ms")
+            pct_of_total = (duration / total_turn * 100.0) if total_turn > 0 else 0.0
+            pct_of_tracked = (duration / sum_tracked * 100.0) if sum_tracked > 0 else 0.0
+            bar_width = int(pct_of_total / 2)  # max 50 chars
+            bar = "█" * bar_width
+            print(f"  {label:<25} {duration*1000:7.1f}ms  {pct_of_total:5.1f}%  {bar}")
+        
+        if untracked > 0.01:
+            pct_untracked = (untracked / total_turn * 100.0)
+            bar_width = int(pct_untracked / 2)
+            bar = "░" * bar_width
+            print(f"  {'[untracked overhead]':<25} {untracked*1000:7.1f}ms  {pct_untracked:5.1f}%  {bar}")
+        
+        print("-" * 60)
+        print(f"  {'TOTAL TURN TIME':<25} {total_turn*1000:7.1f}ms  100.0%")
+        print("=" * 60)
+        print()
+
+        # Additional insights
+        if sum_tracked > 0:
+            capture_time = next((d for l, d in self.events if 'capture' in l.lower()), 0)
+            asr_time = next((d for l, d in self.events if 'asr' in l.lower() or 'whisper' in l.lower()), 0)
+            llm_time = next((d for l, d in self.events if 'llm' in l.lower() or 'stream' in l.lower()), 0)
+            tts_time = next((d for l, d in self.events if 'tts' in l.lower() or 'playback' in l.lower()), 0)
+            feedback_time = next((d for l, d in self.events if 'feedback' in l.lower()), 0)
+            
+            print("📊 Key metrics:")
+            print(f"   User speaking time:     {capture_time*1000:7.1f}ms  ({capture_time/total_turn*100:.1f}% of turn)")
+            print(f"   ASR processing:         {asr_time*1000:7.1f}ms  ({asr_time/total_turn*100:.1f}% of turn)")
+            print(f"   LLM thinking + TTS:     {llm_time*1000:7.1f}ms  ({llm_time/total_turn*100:.1f}% of turn)")
+            print(f"   Audio feedback:         {feedback_time*1000:7.1f}ms  ({feedback_time/total_turn*100:.1f}% of turn)")
+            if tts_time > 0 and tts_time != llm_time:
+                print(f"   Final TTS playback:     {tts_time*1000:7.1f}ms  ({tts_time/total_turn*100:.1f}% of turn)")
+            
+            # Time to first audio output (including feedback)
+            time_to_audio = capture_time + asr_time + feedback_time
+            print(f"   ⚡ Time to first audio:  {time_to_audio*1000:7.1f}ms")
+            print()
 
 
 
@@ -677,6 +773,25 @@ def say_sentence_with_fallback(el: Optional[ElevenLabs], out: OutputAudio, text:
         tts_offline_pyttsx3(text, lang_hint)
 
 
+def play_audio_feedback(out: OutputAudio, tracker: LatencyTracker):
+    """
+    Play beep sound followed by Croatian affirmative 'mhm' with configured delays.
+    This happens while LLM is processing, giving user immediate feedback.
+    """
+    with tracker.track("audio_feedback"):
+        # Wait configured delay after utterance end
+        time.sleep(BEEP_DELAY_MS / 1000.0)
+        
+        # Play beep
+        out.write_float_np(BEEP_SOUND)
+        
+        # Wait configured delay after beep
+        time.sleep(AFFIRMATIVE_DELAY_MS / 1000.0)
+        
+        # Play affirmative sound
+        out.write_float_np(MHM_SOUND)
+
+
 # =========================
 # Conversation Memory
 # =========================
@@ -866,7 +981,7 @@ def main():
             print("Proceeding with offline TTS only.")
 
         mem = Memory(llm)
-        executor = concurrent.futures.ThreadPoolExecutor(max_workers=2)
+        executor = concurrent.futures.ThreadPoolExecutor(max_workers=3)
 
     # Persistent audio output to reduce latency
     out = OutputAudio(samplerate=TARGET_SR, channels=1)
@@ -877,6 +992,7 @@ def main():
     print("Tips:")
     print("- Speak naturally; a short pause ends your turn.")
     print("- Lower RMS_THRESH in .env if it misses quiet speech (e.g. 0.002).")
+    print(f"- Audio feedback: beep after {BEEP_DELAY_MS}ms, 'mhm' after {AFFIRMATIVE_DELAY_MS}ms")
     if WAKE_WORD:
         print(f"- Wake word enabled: say \"{WAKE_WORD}\" to start a turn.")
 
@@ -892,6 +1008,12 @@ def main():
                     continue
 
                 if remote_client:
+                    # Play audio feedback immediately while waiting for remote response
+                    if executor is not None:
+                        feedback_future = executor.submit(play_audio_feedback, out, tracker)
+                    else:
+                        play_audio_feedback(out, tracker)
+                    
                     try:
                         with tracker.track("remote_agent"):
                             result = remote_client.process(wav_buf)
@@ -953,14 +1075,28 @@ def main():
                     mem.add_user(user_text)
                     messages = mem.build_prompt(user_lang_hint=lang)
 
+                # 3b) Play audio feedback (beep + mhm) while LLM is thinking
+                # This happens in parallel with LLM processing
+                feedback_future = None
+                if executor is not None:
+                    feedback_future = executor.submit(play_audio_feedback, out, tracker)
+
                 # 4) LLM reply — stream sentences and speak each sentence immediately
                 assistant_text_parts = []
                 print("🤖 Assistant: ", end="", flush=True)
-                with tracker.track("llm_stream+tts"):
+                
+                llm_start = time.perf_counter()
+                with tracker.track("llm_stream"):
                     future_tts: Optional[concurrent.futures.Future] = None
                     for sent in stream_text_segments(llm, messages):
                         print(sent, end="", flush=True)
                         assistant_text_parts.append(sent)
+                        
+                        # Wait for feedback to finish before starting TTS
+                        if feedback_future is not None:
+                            feedback_future.result()
+                            feedback_future = None
+                        
                         if executor is None:
                             say_sentence_with_fallback(el, out, sent, lang)
                             continue
@@ -975,8 +1111,16 @@ def main():
                         )
                     if future_tts is not None:
                         future_tts.result()
+                
+                llm_duration = time.perf_counter() - llm_start
+                tracker.extend("llm_total", llm_duration)
+                
                 print()  # newline
                 assistant_text = "".join(assistant_text_parts)
+
+                # Make sure feedback is complete
+                if feedback_future is not None:
+                    feedback_future.result()
 
                 # 5) Add to memory
                 with tracker.track("memory_update"):
@@ -995,6 +1139,8 @@ def main():
                 break
             except Exception as e:
                 print("Error:", e)
+                import traceback
+                traceback.print_exc()
                 tracker.report("⏱️ Turn errored")
                 time.sleep(0.2)
             else:

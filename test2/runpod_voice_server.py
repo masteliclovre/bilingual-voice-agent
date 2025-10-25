@@ -4,6 +4,8 @@ Run this on RunPod (or any GPU host) and point REMOTE_AGENT_URL from the
 voice_agent.py client to this server. The server keeps per-session memory so the
 conversation stays coherent across turns. Audio is exchanged as 16 kHz mono WAV
 (PCM16) payloads to keep latency low.
+
+Enhanced with detailed latency tracking.
 """
 
 import base64
@@ -11,6 +13,7 @@ import io
 import os
 import threading
 import uuid
+import time
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -77,6 +80,9 @@ CHANNELS = 1
 WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
 SERVER_AUTH_TOKEN = os.getenv("REMOTE_SERVER_AUTH_TOKEN", "").strip() or None
 
+# Enhanced logging
+ENABLE_LATENCY_LOGGING = os.getenv("ENABLE_LATENCY_LOGGING", "1").strip() in {"1", "true", "yes"}
+
 app = FastAPI(title="Bilingual Voice Agent GPU Server")
 app.add_middleware(
     CORSMiddleware,
@@ -85,6 +91,62 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+# =========================
+# Latency Tracker
+# =========================
+
+class ServerLatencyTracker:
+    """Server-side latency tracking."""
+    
+    def __init__(self):
+        self.events: list[tuple[str, float]] = []
+        self.start_time = time.perf_counter()
+    
+    def track_start(self, label: str):
+        """Mark the start of an operation."""
+        return time.perf_counter()
+    
+    def track_end(self, label: str, start: float):
+        """Mark the end of an operation."""
+        duration = time.perf_counter() - start
+        self.events.append((label, duration))
+        if ENABLE_LATENCY_LOGGING:
+            print(f"  [{label}] {duration*1000:.1f}ms")
+        return duration
+    
+    def get_summary(self) -> dict:
+        """Get timing summary as dict."""
+        total = time.perf_counter() - self.start_time
+        breakdown = {label: duration for label, duration in self.events}
+        breakdown['total'] = total
+        return breakdown
+    
+    def print_report(self):
+        """Print detailed timing report."""
+        if not ENABLE_LATENCY_LOGGING:
+            return
+        
+        total = time.perf_counter() - self.start_time
+        print("\n" + "="*60)
+        print("🖥️  SERVER LATENCY BREAKDOWN")
+        print("="*60)
+        
+        for label, duration in self.events:
+            pct = (duration / total * 100.0) if total > 0 else 0.0
+            bar = "█" * int(pct / 2)
+            print(f"  {label:<30} {duration*1000:7.1f}ms  {pct:5.1f}%  {bar}")
+        
+        tracked_sum = sum(d for _, d in self.events)
+        overhead = total - tracked_sum
+        if overhead > 0.001:
+            pct = (overhead / total * 100.0)
+            bar = "░" * int(pct / 2)
+            print(f"  {'[overhead/network]':<30} {overhead*1000:7.1f}ms  {pct:5.1f}%  {bar}")
+        
+        print("-"*60)
+        print(f"  {'TOTAL':<30} {total*1000:7.1f}ms  100.0%")
+        print("="*60 + "\n")
 
 # =========================
 # Utilities shared with voice_agent
@@ -322,22 +384,36 @@ async def process_turn(
     x_openai_key: Optional[str] = Header(None),
     openai_api_key: Optional[str] = Form(None),
 ):
+    tracker = ServerLatencyTracker()
+    
+    # Receive audio
+    t0 = tracker.track_start("receive_audio")
     audio_bytes = await audio.read()
+    tracker.track_end("receive_audio", t0)
+    
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio payload")
 
+    # Get session
+    t0 = tracker.track_start("session_setup")
     api_key_override = openai_api_key or x_openai_key
     try:
         session_id, state = get_session(session_id, api_key_override)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
+    tracker.track_end("session_setup", t0)
 
+    # Transcribe
+    t0 = tracker.track_start("whisper_asr")
     wav_buf = io.BytesIO(audio_bytes)
     user_text, lang = whisper_transcribe(whisper_model, wav_buf)
+    tracker.track_end("whisper_asr", t0)
 
+    # Wake word check
     if WAKE_WORD:
         cleaned = user_text.lower().strip()
         if not cleaned.startswith(WAKE_WORD.lower()):
+            tracker.print_report()
             return {
                 "session_id": session_id,
                 "text": user_text,
@@ -351,6 +427,7 @@ async def process_turn(
         user_text = user_text[len(WAKE_WORD):].lstrip(" ,.-:") or "Hej!"
 
     if not user_text:
+        tracker.print_report()
         return {
             "session_id": session_id,
             "text": "",
@@ -360,22 +437,39 @@ async def process_turn(
             "tts_sample_rate": TARGET_SR,
         }
 
+    # Memory & LLM
+    t0 = tracker.track_start("memory_build")
     with state.lock:
         state.memory.add_user(user_text)
         messages = state.memory.build_prompt(lang)
-        assistant_text = state.memory.llm.complete(messages)
+    tracker.track_end("memory_build", t0)
+    
+    t0 = tracker.track_start("llm_completion")
+    assistant_text = state.memory.llm.complete(messages)
+    tracker.track_end("llm_completion", t0)
+    
+    t0 = tracker.track_start("memory_update")
+    with state.lock:
         state.memory.add_assistant(assistant_text)
         state.memory.maybe_summarize()
         state.last_lang = lang or state.last_lang
         state.turns += 1
+    tracker.track_end("memory_update", t0)
 
+    # TTS
     audio_b64 = None
     if eleven_client:
         try:
+            t0 = tracker.track_start("elevenlabs_tts")
             pcm_bytes = elevenlabs_tts_pcm(eleven_client, assistant_text)
             audio_b64 = base64.b64encode(pcm_bytes).decode("ascii")
+            tracker.track_end("elevenlabs_tts", t0)
         except Exception as exc:
             print("TTS error:", exc)
+            tracker.track_end("elevenlabs_tts", t0)
+
+    # Print report
+    tracker.print_report()
 
     return {
         "session_id": session_id,

@@ -1,11 +1,11 @@
 # voice_agent_minimal.py
 # Minimal bilingual voice agent - Remote-only version
 # - Audio capture with VAD
-# - Audio feedback (beep + mhm)
+# - Audio feedback (beep)
 # - Remote agent communication
 # - Enhanced latency diagnostics
 # - Audio playback
-# Version: 2025-10-25 (Minimal)
+# Version: 2025-10-25 (Minimal) - Modified to play audio feedback during remote agent wait
 
 import os
 import io
@@ -14,6 +14,8 @@ import time
 import wave
 import base64
 import contextlib
+import threading
+import multiprocessing
 from dataclasses import dataclass
 from typing import Optional
 import numpy as np
@@ -56,7 +58,7 @@ RMS_THRESH = float(os.getenv("RMS_THRESH", "0.003"))
 RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.12"))
 
 # Audio feedback
-BEEP_DELAY_MS = int(os.getenv("BEEP_DELAY_MS", "1000"))
+BEEP_DELAY_MS = int(os.getenv("BEEP_DELAY_MS", "2000"))
 
 # Device selection
 PREFERRED_INPUT_NAME = os.getenv("PREFERRED_INPUT_NAME", "").strip() or None
@@ -235,9 +237,10 @@ def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
 def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
     audio_16k = resample_to_16k(audio_np, sr)
     int16 = np.clip(audio_16k * 32767, -32768, 32767).astype(np.int16)
+    
     buf = io.BytesIO()
-    with wave.open(buf, 'wb') as wf:
-        wf.setnchannels(CHANNELS)
+    with wave.open(buf, "wb") as wf:
+        wf.setnchannels(1)
         wf.setsampwidth(2)
         wf.setframerate(TARGET_SR)
         wf.writeframes(int16.tobytes())
@@ -245,85 +248,99 @@ def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
     return buf
 
 
-def pick_input_device(prefer_name_substr=None, prefer_index=None):
-    devices = sd.query_devices()
-    if isinstance(prefer_index, int) and 0 <= prefer_index < len(devices):
-        if devices[prefer_index]['max_input_channels'] > 0:
-            return prefer_index
-    if prefer_name_substr:
-        p = prefer_name_substr.lower()
-        for i, d in enumerate(devices):
-            if d['max_input_channels'] > 0 and p in d.get('name', '').lower():
-                return i
-    for i, d in enumerate(devices):
-        if d['max_input_channels'] > 0:
-            return i
-    raise RuntimeError("No input audio devices with capture channels.")
+def play_audio_feedback_process(beep_delay_ms: int, stop_flag_value):
+    """Play feedback sounds in separate process - doesn't interfere with main thread."""
+    try:
+        # Create fresh output stream in this process
+        stream = sd.OutputStream(samplerate=TARGET_SR, channels=1, dtype='float32')
+        stream.start()
+        
+        # Play beep
+        stream.write(BEEP_SOUND.reshape(-1, 1))
+        
+        # Wait for delay
+        start = time.time()
+        while (time.time() - start) < (beep_delay_ms / 1000.0):
+            if stop_flag_value.value == 1:  # Check if we should stop
+                stream.stop()
+                stream.close()
+                return
+            time.sleep(0.05)
 
-
-def play_audio_feedback(out: OutputAudio, tracker: LatencyTracker):
-    """Play beep sound followed by mhm with configured delays."""
-    with tracker.track("audio_feedback"):
-        time.sleep(BEEP_DELAY_MS / 1000.0)
-        out.write_float_np(BEEP_SOUND)
+        stream.stop()
+        stream.close()
+    except Exception:
+        pass  # Silently fail if audio doesn't work in subprocess
 
 
 # =========================
 # Audio Capture
 # =========================
 
+def _select_input_device():
+    devices = sd.query_devices()
+    
+    if INPUT_DEVICE_INDEX is not None:
+        if 0 <= INPUT_DEVICE_INDEX < len(devices):
+            return INPUT_DEVICE_INDEX, devices[INPUT_DEVICE_INDEX]["default_samplerate"]
+        print(f"⚠️  Device index {INPUT_DEVICE_INDEX} out of range. Using default.")
+    
+    if PREFERRED_INPUT_NAME:
+        for i, d in enumerate(devices):
+            if d.get("max_input_channels", 0) > 0:
+                if PREFERRED_INPUT_NAME.lower() in d["name"].lower():
+                    return i, d["default_samplerate"]
+        print(f"⚠️  No device matching '{PREFERRED_INPUT_NAME}'. Using default.")
+    
+    default_input = sd.query_devices(kind="input")
+    return None, default_input["default_samplerate"]
+
+
 class ContinuousListener:
-    """Audio capture with RMS VAD."""
+    """Continuous audio capture with VAD."""
     
     def __init__(self):
-        self.device_index = pick_input_device(PREFERRED_INPUT_NAME, INPUT_DEVICE_INDEX)
-        self.dev_info = sd.query_devices(self.device_index)
-        self.device_sr = TARGET_SR
+        self.device_index, self.device_sr = _select_input_device()
+        self.device_sr = int(self.device_sr)
+        
+        device_info = sd.query_devices(self.device_index, kind="input")
+        device_name = device_info.get("name", "Unknown")
+        print(f"\n🎤 Using input device: {device_name} @ {self.device_sr} Hz")
 
-    def record_utterance(self):
-        """Capture one utterance based on RMS VAD."""
-        print("\n🎙️ Listening… (speak; short pause = end)")
+    def record_utterance(self) -> io.BytesIO:
+        print("\n🎧 Listening...", end=" ", flush=True)
+        
+        frame_samples = int(self.device_sr * FRAME_DURATION_MS / 1000.0)
+        max_frames = int((MAX_UTTERANCE_SECS * 1000.0) / FRAME_DURATION_MS)
+        
         chunks = []
-        start_time = time.time()
-        last_above = None
-        frame_samples = max(256, int(TARGET_SR * FRAME_DURATION_MS / 1000))
-        started_speaking = False
-
-        def callback(indata, frames, time_info, status):
-            nonlocal last_above, started_speaking
-            if status:
-                print(status, file=sys.stderr)
-            mono = indata.copy().reshape(-1)
-            rms = float(np.sqrt(np.mean(mono**2)) + 1e-12)
-            chunks.append(mono.tobytes())
-            if rms > RMS_THRESH:
-                last_above = time.time()
-                started_speaking = True
-
-        stream_kwargs = dict(
-            device=self.device_index,
-            channels=CHANNELS,
-            samplerate=self.device_sr,
-            dtype='float32',
-            blocksize=frame_samples,
-            callback=callback,
-        )
-
+        last_above: Optional[float] = None
+        start_time: Optional[float] = None
+        
         try:
-            try:
-                stream = sd.InputStream(latency='low', **stream_kwargs)
-            except Exception:
-                stream = sd.InputStream(**stream_kwargs)
-
-            with stream:
-                while True:
-                    time.sleep(0.04)
-                    now = time.time()
-                    if now - start_time > MAX_UTTERANCE_SECS:
-                        break
-                    if started_speaking:
-                        if last_above is not None and (now - last_above) > max(SILENCE_TIMEOUT_SECS, RMS_HANGOVER):
-                            break
+            with sd.InputStream(
+                device=self.device_index,
+                samplerate=self.device_sr,
+                channels=1,
+                dtype='float32',
+                latency='low',
+                blocksize=frame_samples,
+            ) as stream:
+                for _ in range(max_frames):
+                    buf, _ = stream.read(frame_samples)
+                    rms = float(np.sqrt(np.mean(buf**2)))
+                    now = time.perf_counter()
+                    
+                    if rms > RMS_THRESH:
+                        if start_time is None:
+                            start_time = now
+                        last_above = now
+                        chunks.append(buf.tobytes())
+                    else:
+                        if last_above is not None:
+                            chunks.append(buf.tobytes())
+                            if (now - last_above) > max(SILENCE_TIMEOUT_SECS, RMS_HANGOVER):
+                                break
         except Exception as e:
             print("Stream error:", e)
             return io.BytesIO()
@@ -479,9 +496,6 @@ def main():
         REMOTE_AGENT_TOKEN,
         openai_api_key=REMOTE_AGENT_OPENAI_KEY,
     )
-    
-    if REMOTE_AGENT_OPENAI_KEY:
-        print("✅ Forwarding OpenAI API key to remote agent server.")
 
     out = OutputAudio(samplerate=TARGET_SR, channels=1)
     listener = ContinuousListener()
@@ -505,15 +519,35 @@ def main():
                     tracker.report("⏱️ Turn skipped (no usable audio)")
                     continue
 
-                # Play audio feedback while waiting for remote response
-                play_audio_feedback(out, tracker)
+                # Create stop flag for audio feedback process
+                stop_flag = multiprocessing.Value('i', 0)
+                result = None
+                exception = None
                 
-                # Send to remote agent
+                # Start audio feedback in separate PROCESS (not thread)
+                feedback_process = multiprocessing.Process(
+                    target=play_audio_feedback_process,
+                    args=(BEEP_DELAY_MS, stop_flag),
+                    daemon=True
+                )
+                feedback_process.start()
+                
+                # Send to remote agent (happens in parallel, no GIL interference)
                 try:
                     with tracker.track("remote_agent"):
                         result = remote_client.process(wav_buf)
                 except Exception as e:
-                    print(f"❌ Remote agent error: {e}")
+                    exception = e
+                finally:
+                    # Signal audio feedback to stop
+                    stop_flag.value = 1
+                    feedback_process.join(timeout=0.5)
+                    if feedback_process.is_alive():
+                        feedback_process.terminate()
+                
+                # Handle any exception from remote agent
+                if exception:
+                    print(f"❌ Remote agent error: {exception}")
                     tracker.report()
                     continue
                 

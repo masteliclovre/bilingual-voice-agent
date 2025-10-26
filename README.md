@@ -15,7 +15,7 @@ A bilingual (Croatian/English) voice assistant that captures audio from your mic
 
 The project is split into two components:
 
-- **Client** (`voice_agent_minimal.py`) – Runs locally on your machine
+- **Client** (`voice_agent.py`) – Runs locally on your machine
   - Captures microphone input
   - Performs lightweight Voice Activity Detection (VAD)
   - Sends audio to remote server
@@ -32,12 +32,12 @@ The project is split into two components:
 ```text
 bilingual-voice-agent/
 ├── README.md
-├── ENV_SETUP.md              # Detailed environment configuration guide
-├── requirements.txt          # Python dependencies
-├── .env.template             # Environment variable template
-├── .gitignore
-├── voice_agent_minimal.py    # Local client
-└── server.py                 # Remote GPU server
+├── test2/
+|   ├── requirements.txt          # Python dependencies for both client and server
+│   ├── voice_agent.py            # Local client
+│   ├── server.py                 # Remote GPU server
+|   ├── .env.template             # Environment variable template
+│   └── .gitignore
 ```
 
 ## 🚀 Getting Started
@@ -46,7 +46,6 @@ bilingual-voice-agent/
 
 - Python 3.10+
 - Microphone and audio output
-- API keys (see [ENV_SETUP.md](ENV_SETUP.md))
 
 ### Installation
 
@@ -72,15 +71,13 @@ bilingual-voice-agent/
    cp .env.template .env
    # Edit .env with your API keys and settings
    ```
-   
-   See [ENV_SETUP.md](ENV_SETUP.md) for detailed configuration instructions.
 
 ### Running the Client
 
 The client runs on your local machine and requires a remote server to be running:
 
 ```bash
-python voice_agent_minimal.py
+python voice_agent.py
 ```
 
 **Requirements:**
@@ -169,8 +166,6 @@ REMOTE_SERVER_AUTH_TOKEN=your_auth_token
 | **HTTP** | `HTTP_CONNECT_TIMEOUT` | Connection timeout | `2.0` |
 | | `HTTP_READ_TIMEOUT` | Read timeout | `30.0` |
 | | `PORT` | Server port | `8000` |
-
-For detailed configuration instructions, see [ENV_SETUP.md](ENV_SETUP.md).
 
 ## 🎤 Audio Device Selection
 
@@ -332,10 +327,7 @@ cp .env.template .env
 
 ## 📧 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/bilingual-voice-agent/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/bilingual-voice-agent/discussions)
-- **Documentation**: [ENV_SETUP.md](ENV_SETUP.md)
+- **Issues**: [GitHub Issues](https://github.com/masteliclovre/bilingual-voice-agent/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/masteliclovre/bilingual-voice-agent/discussions)
 
 ---
-
-Made with ❤️ for bilingual voice interaction

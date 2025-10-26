@@ -1,11 +1,12 @@
 """FastAPI server that runs the bilingual voice agent pipeline on a GPU backend.
 
-Run this on RunPod (or any GPU host) and point REMOTE_AGENT_URL from the
+Run this on any GPU host and point REMOTE_AGENT_URL from the
 voice_agent.py client to this server. The server keeps per-session memory so the
 conversation stays coherent across turns. Audio is exchanged as 16 kHz mono WAV
 (PCM16) payloads to keep latency low.
 """
 
+import numpy as np
 import base64
 import io
 import os
@@ -14,7 +15,6 @@ import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
-import numpy as np
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Header
 from fastapi.middleware.cors import CORSMiddleware
@@ -51,20 +51,31 @@ ensure_hf_transfer_optional()
 # Config (mirrors voice_agent.py)
 # =========================
 
+# LLM Provider configuration
+LLM_PROVIDER = os.getenv("LLM_PROVIDER", "groq").lower()
+
+# API Keys
+DEFAULT_GROQ_API_KEY = os.getenv("GROQ_API_KEY", "").strip()
 DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
+
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vFQACl5nAIV0owAavYxE")
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "GoranS/whisper-large-v3-turbo-hr-parla-ctranslate2")
-WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cuda")
-WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "float16")
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", "GoranS/whisper-base-1m.hr-ctranslate2")
+WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
+WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
 
-OPENAI_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
-OPENAI_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
-OPENAI_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "180"))
+# LLM Model configuration
+if LLM_PROVIDER == "groq":
+    LLM_MODEL = os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile")
+else:
+    LLM_MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
-MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "12"))
-SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "4"))
+LLM_TEMPERATURE = float(os.getenv("OPENAI_TEMPERATURE", "0.3"))
+LLM_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
+
+MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "8"))
+SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "8"))
 
 TARGET_SR = 16000
 CHANNELS = 1
@@ -152,15 +163,25 @@ llm_clients: Dict[str, "LLMClient"] = {}
 
 
 class LLMClient:
-    def __init__(self, api_key: str):
+    def __init__(self, api_key: str, provider: str = LLM_PROVIDER):
         api_key = api_key.strip()
         if not api_key:
-            raise RuntimeError("Missing OPENAI_API_KEY for remote voice agent server.")
+            raise RuntimeError(f"Missing API key for {provider} LLM provider.")
+        
         self.api_key = api_key
-        self.client = OpenAI(api_key=api_key)
-        self.model = OPENAI_MODEL
+        self.provider = provider
+        self.model = LLM_MODEL
+        
+        # Configure client based on provider
+        if provider == "groq":
+            self.client = OpenAI(
+                api_key=api_key,
+                base_url="https://api.groq.com/openai/v1"
+            )
+        else:  # openai
+            self.client = OpenAI(api_key=api_key)
 
-    def complete(self, messages, temperature=OPENAI_TEMPERATURE, max_tokens=OPENAI_MAX_TOKENS):
+    def complete(self, messages, temperature=LLM_TEMPERATURE, max_tokens=LLM_MAX_TOKENS):
         params = dict(
             model=self.model,
             messages=messages,
@@ -234,12 +255,19 @@ def init_elevenlabs() -> Optional[ElevenLabs]:
 
 
 def get_llm_client(api_key_override: Optional[str]) -> LLMClient:
-    key = (api_key_override or DEFAULT_OPENAI_API_KEY).strip()
+    """Get or create LLM client based on provider."""
+    if LLM_PROVIDER == "groq":
+        key = (api_key_override or DEFAULT_GROQ_API_KEY).strip()
+    else:
+        key = (api_key_override or DEFAULT_OPENAI_API_KEY).strip()
+    
     if not key:
-        raise RuntimeError("Missing OPENAI_API_KEY for remote voice agent server.")
-    if key not in llm_clients:
-        llm_clients[key] = LLMClient(key)
-    return llm_clients[key]
+        raise RuntimeError(f"Missing API key for {LLM_PROVIDER} LLM provider.")
+    
+    cache_key = f"{LLM_PROVIDER}:{key}"
+    if cache_key not in llm_clients:
+        llm_clients[cache_key] = LLMClient(key, LLM_PROVIDER)
+    return llm_clients[cache_key]
 
 
 def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
@@ -294,16 +322,17 @@ def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> t
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok"}
+    return {"status": "ok", "llm_provider": LLM_PROVIDER, "llm_model": LLM_MODEL}
 
 
 @app.post("/api/session")
 def create_session(
     _: None = Depends(require_auth),
-    x_openai_key: Optional[str] = Header(None),
+    x_api_key: Optional[str] = Header(None),
 ):
+    """Create a new session. Accepts API key via x_api_key header."""
     try:
-        session_id, _ = get_session(None, x_openai_key)
+        session_id, _ = get_session(None, x_api_key)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
     return {"session_id": session_id}
@@ -314,14 +343,15 @@ async def process_turn(
     audio: UploadFile = File(...),
     session_id: Optional[str] = Form(None),
     _: None = Depends(require_auth),
-    x_openai_key: Optional[str] = Header(None),
-    openai_api_key: Optional[str] = Form(None),
+    x_api_key: Optional[str] = Header(None),
+    api_key: Optional[str] = Form(None),
 ):
+    """Process audio turn. Accepts API key via x_api_key header or api_key form field."""
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio payload")
 
-    api_key_override = openai_api_key or x_openai_key
+    api_key_override = api_key or x_api_key
     try:
         session_id, state = get_session(session_id, api_key_override)
     except RuntimeError as exc:
@@ -386,4 +416,6 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
+    print(f"Starting server with LLM provider: {LLM_PROVIDER}")
+    print(f"Using model: {LLM_MODEL}")
     uvicorn.run(app, host="0.0.0.0", port=port)

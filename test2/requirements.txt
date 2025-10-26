@@ -1,20 +1,46 @@
+# ========================================
+# Core ML & Audio Processing
+# ========================================
 faster-whisper
-sounddevice
-scipy
-pydub
-numpy
-python-dotenv
-openai
-groq
-elevenlabs
-silero-vad
 torch
+numpy
+scipy
+
+# ========================================
+# Audio I/O & Processing
+# ========================================
+sounddevice
+pydub
 pygame
-webrtcvad-wheels ; sys_platform == "win32"
 pyttsx3
 
+# ========================================
+# Voice Activity Detection (VAD)
+# ========================================
+silero-vad
+webrtcvad-wheels ; sys_platform == "win32"
+
+# ========================================
+# LLM Providers
+# ========================================
+openai
+groq
+
+# ========================================
+# Text-to-Speech
+# ========================================
+elevenlabs
+
+# ========================================
+# FastAPI Server
+# ========================================
 fastapi
 uvicorn[standard]
 python-multipart
 websockets
+
+# ========================================
+# Utilities
+# ========================================
+python-dotenv
 hf_transfer

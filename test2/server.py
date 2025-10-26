@@ -24,29 +24,6 @@ from elevenlabs import ElevenLabs
 
 load_dotenv()
 
-def ensure_hf_transfer_optional():
-    """Disable the Hugging Face fast-transfer path if the package is missing."""
-
-    enable_fast = os.getenv("HF_HUB_ENABLE_HF_TRANSFER", "").strip()
-    if not enable_fast:
-        return
-
-    truthy = {"1", "true", "yes", "on"}
-    if enable_fast.lower() not in truthy:
-        return
-
-    try:
-        __import__("hf_transfer")
-    except ModuleNotFoundError:
-        print(
-            "HF_HUB_ENABLE_HF_TRANSFER is set but hf_transfer is not installed. "
-            "Falling back to the standard downloader."
-        )
-        os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-
-
-ensure_hf_transfer_optional()
-
 # =========================
 # Config (mirrors voice_agent.py)
 # =========================
@@ -78,9 +55,7 @@ MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "8"))
 SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "8"))
 
 TARGET_SR = 16000
-CHANNELS = 1
 
-WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
 SERVER_AUTH_TOKEN = os.getenv("REMOTE_SERVER_AUTH_TOKEN", "").strip() or None
 
 app = FastAPI(title="Bilingual Voice Agent GPU Server")
@@ -359,21 +334,6 @@ async def process_turn(
 
     wav_buf = io.BytesIO(audio_bytes)
     user_text, lang = whisper_transcribe(whisper_model, wav_buf)
-
-    if WAKE_WORD:
-        cleaned = user_text.lower().strip()
-        if not cleaned.startswith(WAKE_WORD.lower()):
-            return {
-                "session_id": session_id,
-                "text": user_text,
-                "lang": lang,
-                "assistant_text": "",
-                "tts_audio_b64": None,
-                "tts_sample_rate": TARGET_SR,
-                "skipped": True,
-                "reason": "wake_word_missing",
-            }
-        user_text = user_text[len(WAKE_WORD):].lstrip(" ,.-:") or "Hej!"
 
     if not user_text:
         return {

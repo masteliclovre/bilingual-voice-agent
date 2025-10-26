@@ -1,11 +1,15 @@
-# voice_agent_minimal.py
-# Minimal bilingual voice agent - Remote-only version
+"""
+# Bilingual voice agent - Remote-only version
 # - Audio capture with VAD
 # - Audio feedback (beep)
 # - Remote agent communication
 # - Enhanced latency diagnostics
 # - Audio playback
-# Version: 2025-10-25 (Minimal) - Modified to play audio feedback during remote agent wait
+"""
+
+# =========================
+# Imports
+# =========================
 
 import os
 import io
@@ -18,6 +22,7 @@ import threading
 import multiprocessing
 from dataclasses import dataclass
 from typing import Optional
+
 import numpy as np
 
 try:
@@ -34,22 +39,18 @@ from urllib3.util.retry import Retry
 
 load_dotenv()
 
+
 # =========================
 # Configuration
 # =========================
 
+# Remote Agent
 REMOTE_AGENT_URL = os.getenv("REMOTE_AGENT_URL", "").strip() or None
 REMOTE_AGENT_TOKEN = os.getenv("REMOTE_AGENT_TOKEN", "").strip() or None
 REMOTE_AGENT_OPENAI_KEY = os.getenv("REMOTE_AGENT_OPENAI_KEY", "").strip() or None
 
-if not REMOTE_AGENT_OPENAI_KEY:
-    forward_flag = os.getenv("REMOTE_AGENT_FORWARD_OPENAI_KEY", "1").strip().lower() in {"1", "true", "yes", "on"}
-    if forward_flag:
-        REMOTE_AGENT_OPENAI_KEY = os.getenv("OPENAI_API_KEY", "").strip() or None
-
-# Audio settings
+# Audio Settings
 TARGET_SR = 16000
-CHANNELS = 1
 FRAME_DURATION_MS = int(os.getenv("FRAME_DURATION_MS", "15"))
 MAX_UTTERANCE_SECS = 45
 SILENCE_TIMEOUT_SECS = float(os.getenv("SILENCE_TIMEOUT_SECS", "0.2"))
@@ -57,18 +58,15 @@ MIN_SPEECH_SECS = float(os.getenv("MIN_SPEECH_SECS", "0.3"))
 RMS_THRESH = float(os.getenv("RMS_THRESH", "0.003"))
 RMS_HANGOVER = float(os.getenv("RMS_HANGOVER", "0.12"))
 
-# Audio feedback
+# Audio Feedback
 BEEP_DELAY_MS = int(os.getenv("BEEP_DELAY_MS", "2000"))
 
-# Device selection
+# Device Selection
 PREFERRED_INPUT_NAME = os.getenv("PREFERRED_INPUT_NAME", "").strip() or None
 INPUT_DEVICE_INDEX = os.getenv("INPUT_DEVICE_INDEX", "").strip()
 INPUT_DEVICE_INDEX = int(INPUT_DEVICE_INDEX) if INPUT_DEVICE_INDEX.isdigit() else None
 
-# Wake word
-WAKE_WORD = os.getenv("WAKE_WORD", "").strip() or None
-
-# HTTP timeouts
+# HTTP Timeouts
 HTTP_CONNECT_TIMEOUT = float(os.getenv("HTTP_CONNECT_TIMEOUT", "4.0"))
 HTTP_READ_TIMEOUT = float(os.getenv("HTTP_READ_TIMEOUT", "60.0"))
 HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
@@ -79,10 +77,15 @@ HTTP_TIMEOUT = (HTTP_CONNECT_TIMEOUT, HTTP_READ_TIMEOUT)
 # =========================
 
 def _configure_http_session(session: requests.Session) -> requests.Session:
+    """Configure HTTP session with retries and connection pooling."""
     adapter = HTTPAdapter(
         pool_connections=8,
         pool_maxsize=16,
-        max_retries=Retry(total=2, backoff_factor=0.1, status_forcelist=[429, 502, 503, 504]),
+        max_retries=Retry(
+            total=2,
+            backoff_factor=0.1,
+            status_forcelist=[429, 502, 503, 504]
+        ),
     )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
@@ -94,6 +97,7 @@ _shared_http_session: Optional[requests.Session] = None
 
 
 def _get_shared_http_session() -> requests.Session:
+    """Get or create a shared HTTP session with thread safety."""
     global _shared_http_session
     with _http_session_lock:
         if _shared_http_session is None:
@@ -106,7 +110,7 @@ def _get_shared_http_session() -> requests.Session:
 # =========================
 
 def generate_rising_beep(start_freq=200, end_freq=300, duration_ms=600):
-    """Frequency rises from low to high (swoosh up)."""
+    """Generate a rising frequency beep (swoosh up)."""
     duration_sec = duration_ms / 1000.0
     samples = int(TARGET_SR * duration_sec)
     t = np.linspace(0, duration_sec, samples, False)
@@ -116,13 +120,14 @@ def generate_rising_beep(start_freq=200, end_freq=300, duration_ms=600):
     phase = 2 * np.pi * np.cumsum(freq) / TARGET_SR
     tone = np.sin(phase).astype(np.float32)
     
-    # Envelope
+    # Envelope with fade in/out
     envelope = np.ones_like(tone)
     fade_samples = int(TARGET_SR * 0.01)
     envelope[:fade_samples] = np.linspace(0, 1, fade_samples)
     envelope[-fade_samples:] = np.linspace(1, 0, fade_samples)
     
     return tone * envelope * 0.3
+
 
 # Pre-generate beep sound
 BEEP_SOUND = generate_rising_beep()
@@ -133,7 +138,7 @@ BEEP_SOUND = generate_rising_beep()
 # =========================
 
 class OutputAudio:
-    """Persistent output stream."""
+    """Persistent audio output stream."""
     
     def __init__(self, samplerate=TARGET_SR, channels=1):
         stream_kwargs = dict(
@@ -148,17 +153,20 @@ class OutputAudio:
         self.stream.start()
 
     def write_int16_bytes(self, pcm_bytes: bytes):
+        """Write PCM16 audio bytes to output stream."""
         if not pcm_bytes:
             return
         pcm = np.frombuffer(pcm_bytes, dtype=np.int16).astype(np.float32) / 32768.0
         self.stream.write(pcm.reshape(-1, 1))
 
     def write_float_np(self, pcm: np.ndarray):
+        """Write float32 numpy audio to output stream."""
         if pcm.size == 0:
             return
         self.stream.write(pcm.reshape(-1, 1))
 
     def close(self):
+        """Close the output stream."""
         try:
             self.stream.stop()
             self.stream.close()
@@ -171,7 +179,7 @@ class OutputAudio:
 # =========================
 
 class LatencyTracker:
-    """Enhanced latency tracking."""
+    """Track and report latency for different operations."""
     
     def __init__(self):
         self.events: list[tuple[str, float]] = []
@@ -179,6 +187,7 @@ class LatencyTracker:
 
     @contextlib.contextmanager
     def track(self, label: str):
+        """Context manager to track timing of an operation."""
         start = time.perf_counter()
         try:
             yield
@@ -187,10 +196,12 @@ class LatencyTracker:
             self.events.append((label, max(0.0, end - start)))
 
     def clear(self):
+        """Clear all tracked events and reset timer."""
         self.events.clear()
         self.turn_start = time.perf_counter()
 
     def report(self, title: str = "⏱️ Latency breakdown"):
+        """Print a detailed latency report."""
         if not self.events:
             return
         
@@ -226,6 +237,7 @@ class LatencyTracker:
 # =========================
 
 def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
+    """Resample audio to 16kHz."""
     if src_sr == TARGET_SR:
         return audio_np
     target_len = int(len(audio_np) * TARGET_SR / src_sr)
@@ -235,6 +247,7 @@ def resample_to_16k(audio_np: np.ndarray, src_sr: int) -> np.ndarray:
 
 
 def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
+    """Convert float32 audio to WAV format bytes."""
     audio_16k = resample_to_16k(audio_np, sr)
     int16 = np.clip(audio_16k * 32767, -32768, 32767).astype(np.int16)
     
@@ -248,116 +261,135 @@ def float32_to_wav_bytes(audio_np: np.ndarray, sr: int) -> io.BytesIO:
     return buf
 
 
-def play_audio_feedback_process(beep_delay_ms: int, stop_flag_value):
-    """Play feedback sounds in separate process - doesn't interfere with main thread."""
-    try:
-        # Create fresh output stream in this process
-        stream = sd.OutputStream(samplerate=TARGET_SR, channels=1, dtype='float32')
-        stream.start()
-        
-        # Play beep
-        stream.write(BEEP_SOUND.reshape(-1, 1))
-        
-        # Wait for delay
-        start = time.time()
-        while (time.time() - start) < (beep_delay_ms / 1000.0):
-            if stop_flag_value.value == 1:  # Check if we should stop
-                stream.stop()
-                stream.close()
-                return
-            time.sleep(0.05)
-
-        stream.stop()
-        stream.close()
-    except Exception:
-        pass  # Silently fail if audio doesn't work in subprocess
-
-
-# =========================
-# Audio Capture
-# =========================
-
-def _select_input_device():
+def select_input_device():
+    """Select the best available input device."""
     devices = sd.query_devices()
     
     if INPUT_DEVICE_INDEX is not None:
-        if 0 <= INPUT_DEVICE_INDEX < len(devices):
-            return INPUT_DEVICE_INDEX, devices[INPUT_DEVICE_INDEX]["default_samplerate"]
-        print(f"⚠️  Device index {INPUT_DEVICE_INDEX} out of range. Using default.")
+        dev = devices[INPUT_DEVICE_INDEX]
+        print(f"Using device {INPUT_DEVICE_INDEX}: {dev['name']}")
+        return INPUT_DEVICE_INDEX, int(dev['default_samplerate'])
     
     if PREFERRED_INPUT_NAME:
-        for i, d in enumerate(devices):
-            if d.get("max_input_channels", 0) > 0:
-                if PREFERRED_INPUT_NAME.lower() in d["name"].lower():
-                    return i, d["default_samplerate"]
-        print(f"⚠️  No device matching '{PREFERRED_INPUT_NAME}'. Using default.")
+        for idx, dev in enumerate(devices):
+            if PREFERRED_INPUT_NAME.lower() in dev['name'].lower():
+                print(f"Using device {idx}: {dev['name']}")
+                return idx, int(dev['default_samplerate'])
     
-    default_input = sd.query_devices(kind="input")
-    return None, default_input["default_samplerate"]
+    default = sd.default.device[0]
+    if default is None:
+        default = 0
+    dev = devices[default]
+    print(f"Using default device {default}: {dev['name']}")
+    return default, int(dev['default_samplerate'])
 
+
+def play_audio_feedback_process(delay_ms: int, stop_flag):
+    """
+    Play audio feedback in a separate process.
+    
+    This runs in its own process to avoid Python's GIL blocking audio playback
+    while the main process waits for remote agent response.
+    """
+    time.sleep(delay_ms / 1000.0)
+    
+    if stop_flag.value:
+        return
+    
+    try:
+        stream_kwargs = dict(
+            samplerate=TARGET_SR,
+            channels=1,
+            dtype='float32',
+        )
+        try:
+            stream = sd.OutputStream(latency='low', **stream_kwargs)
+        except Exception:
+            stream = sd.OutputStream(**stream_kwargs)
+        
+        stream.start()
+        stream.write(BEEP_SOUND.reshape(-1, 1))
+        stream.stop()
+        stream.close()
+    except Exception:
+        pass
+
+
+# =========================
+# Voice Activity Detection
+# =========================
 
 class ContinuousListener:
-    """Continuous audio capture with VAD."""
+    """Continuous audio listener with VAD."""
     
     def __init__(self):
-        self.device_index, self.device_sr = _select_input_device()
-        self.device_sr = int(self.device_sr)
-        
-        device_info = sd.query_devices(self.device_index, kind="input")
-        device_name = device_info.get("name", "Unknown")
-        print(f"\n🎤 Using input device: {device_name} @ {self.device_sr} Hz")
+        self.device_idx, self.device_sr = select_input_device()
+        self.frame_size = int(self.device_sr * FRAME_DURATION_MS / 1000.0)
 
     def record_utterance(self) -> io.BytesIO:
-        print("\n🎧 Listening...", end=" ", flush=True)
+        """Record a single utterance using simple RMS-based VAD."""
+        print("🎙️  Listening...")
         
-        frame_samples = int(self.device_sr * FRAME_DURATION_MS / 1000.0)
-        max_frames = int((MAX_UTTERANCE_SECS * 1000.0) / FRAME_DURATION_MS)
-        
-        chunks = []
-        last_above: Optional[float] = None
-        start_time: Optional[float] = None
+        stream_kwargs = dict(
+            device=self.device_idx,
+            samplerate=self.device_sr,
+            channels=1,
+            dtype='float32',
+            blocksize=self.frame_size,
+        )
         
         try:
-            with sd.InputStream(
-                device=self.device_index,
-                samplerate=self.device_sr,
-                channels=1,
-                dtype='float32',
-                latency='low',
-                blocksize=frame_samples,
-            ) as stream:
-                for _ in range(max_frames):
-                    buf, _ = stream.read(frame_samples)
-                    rms = float(np.sqrt(np.mean(buf**2)))
-                    now = time.perf_counter()
-                    
-                    if rms > RMS_THRESH:
-                        if start_time is None:
-                            start_time = now
-                        last_above = now
-                        chunks.append(buf.tobytes())
-                    else:
-                        if last_above is not None:
-                            chunks.append(buf.tobytes())
-                            if (now - last_above) > max(SILENCE_TIMEOUT_SECS, RMS_HANGOVER):
-                                break
-        except Exception as e:
-            print("Stream error:", e)
+            stream = sd.InputStream(latency='low', **stream_kwargs)
+        except Exception:
+            stream = sd.InputStream(**stream_kwargs)
+        
+        stream.start()
+        
+        chunks = []
+        triggered = False
+        silent_frames = 0
+        hangover_frames = int(RMS_HANGOVER * 1000.0 / FRAME_DURATION_MS)
+        silence_limit = int(SILENCE_TIMEOUT_SECS * 1000.0 / FRAME_DURATION_MS)
+        max_frames = int(MAX_UTTERANCE_SECS * 1000.0 / FRAME_DURATION_MS)
+        
+        try:
+            for _ in range(max_frames):
+                frame, overflow = stream.read(self.frame_size)
+                if overflow:
+                    print("⚠️  Audio overflow")
+                
+                rms = np.sqrt(np.mean(frame ** 2))
+                chunks.append(frame.copy())
+                
+                if rms > RMS_THRESH:
+                    if not triggered:
+                        print("🗣️  Speech detected...")
+                        triggered = True
+                    silent_frames = 0
+                else:
+                    if triggered:
+                        silent_frames += 1
+                        if silent_frames > (silence_limit + hangover_frames):
+                            break
+            else:
+                print(f"⏹️  Max utterance length reached ({MAX_UTTERANCE_SECS}s)")
+        
+        finally:
+            stream.stop()
+            stream.close()
+        
+        if not triggered:
+            print("⏹️  No speech detected.")
             return io.BytesIO()
-
-        if not chunks:
-            print("⏹️ End (no audio).")
-            return io.BytesIO()
-
-        audio_float = b"".join(chunks)
-        audio_np = np.frombuffer(audio_float, dtype=np.float32)
-
+        
+        audio_np = np.concatenate(chunks, axis=0).flatten()
         duration_sec = len(audio_np) / float(self.device_sr)
+        
         if duration_sec < MIN_SPEECH_SECS:
-            print("⏹️ End (too short).")
+            print("⏹️  End (too short).")
             return io.BytesIO()
-
-        print("⏹️ End of utterance.")
+        
+        print("⏹️  End of utterance.")
         return float32_to_wav_bytes(audio_np, self.device_sr)
 
 
@@ -367,6 +399,7 @@ class ContinuousListener:
 
 @dataclass
 class RemoteAgentResult:
+    """Result from remote agent processing."""
     user_text: str
     assistant_text: str
     lang: Optional[str]
@@ -378,6 +411,8 @@ class RemoteAgentResult:
 
 
 class RemoteAgentClient:
+    """Client for communicating with remote voice agent server."""
+    
     def __init__(self, base_url: str, token: Optional[str] = None, openai_api_key: Optional[str] = None):
         self.base_url = base_url.rstrip("/")
         if not self.base_url.endswith("/api"):
@@ -388,6 +423,7 @@ class RemoteAgentClient:
         self.session = _configure_http_session(requests.Session())
 
     def _headers(self):
+        """Build request headers."""
         headers = {}
         if self.token:
             headers["X-Auth"] = self.token
@@ -396,8 +432,10 @@ class RemoteAgentClient:
         return headers
 
     def ensure_session(self):
+        """Ensure we have a valid session ID."""
         if self.session_id:
             return
+        
         resp = self.session.post(
             f"{self.base_url}/session",
             headers=self._headers(),
@@ -406,11 +444,14 @@ class RemoteAgentClient:
         resp.raise_for_status()
         data = resp.json()
         sid = data.get("session_id")
+        
         if not sid:
             raise RuntimeError("Remote agent did not return a session_id")
+        
         self.session_id = sid
 
     def process(self, wav_buf: io.BytesIO) -> Optional[RemoteAgentResult]:
+        """Send audio to remote agent and get response."""
         payload = wav_buf.getvalue()
         if not payload:
             return None
@@ -477,6 +518,8 @@ class RemoteAgentClient:
 # =========================
 
 def main():
+    """Main application loop."""
+    
     # Validate configuration
     if not REMOTE_AGENT_URL:
         print("\n" + "=" * 60)
@@ -503,9 +546,7 @@ def main():
     print("\n🎙️ Bilingual voice agent ready. (HR/EN)")
     print("Tips:")
     print("- Speak naturally; a short pause ends your turn.")
-    if WAKE_WORD:
-        print(f"- Wake word enabled: say \"{WAKE_WORD}\" to start a turn.")
-
+    
     try:
         while True:
             try:
@@ -553,12 +594,6 @@ def main():
                 
                 if not result or not result.user_text:
                     tracker.report("⏱️ Turn skipped (remote empty)")
-                    continue
-                
-                if result.skipped:
-                    if (result.reason == "wake_word_missing") and WAKE_WORD:
-                        print(f"(Ignored — missing wake word '{WAKE_WORD}')")
-                    tracker.report("⏱️ Turn skipped (wake word)")
                     continue
                 
                 # Display results

@@ -1,122 +1,341 @@
 # Bilingual Voice Agent
 
-This repository contains a bilingual (Croatian/English) voice assistant that captures audio from a
-local microphone, streams the utterance to a remote GPU-backed inference service, and plays the
-synthesised speech response. The project is split into two main pieces:
+A bilingual (Croatian/English) voice assistant that captures audio from your microphone, processes it through a remote GPU-backed server, and plays back synthesized speech responses. The system intelligently detects which language you're speaking and responds in the same language.
 
-- **Client** – captures microphone input, performs lightweight voice-activity detection (VAD),
-  sends speech to the remote server, and plays back the answer.
-- **Server** – runs on a GPU host, performs speech-to-text (Faster-Whisper), reasoning via an LLM
-  (Groq or OpenAI), and text-to-speech synthesis (ElevenLabs).
+## 🎯 Features
 
-## Repository layout
+- **Bilingual support** - Seamlessly handles Croatian and English
+- **Remote processing** - Heavy computation runs on GPU server
+- **Low latency** - Optimized for real-time conversation
+- **Voice Activity Detection** - Automatically detects when you stop speaking
+- **Memory system** - Maintains conversation context across turns
+- **Audio feedback** - Subtle beep indicates when waiting for response
+
+## 🏗️ Architecture
+
+The project is split into two components:
+
+- **Client** (`voice_agent_minimal.py`) – Runs locally on your machine
+  - Captures microphone input
+  - Performs lightweight Voice Activity Detection (VAD)
+  - Sends audio to remote server
+  - Plays back synthesized responses
+
+- **Server** (`server.py`) – Runs on GPU host (RunPod, Lambda Labs, etc.)
+  - Speech-to-Text using Faster-Whisper
+  - Language detection and reasoning via Groq/OpenAI
+  - Text-to-Speech synthesis via ElevenLabs
+  - Session management and conversation memory
+
+## 📁 Repository Layout
 
 ```text
 bilingual-voice-agent/
 ├── README.md
-├── test2/
-|   ├── requirements.txt          # Python dependencies for both client and server
-│   ├── voice_agent.py
-│   ├── server.py
-│   └── .gitignore
+├── ENV_SETUP.md              # Detailed environment configuration guide
+├── requirements.txt          # Python dependencies
+├── .env.template             # Environment variable template
+├── .gitignore
+├── voice_agent_minimal.py    # Local client
+└── server.py                 # Remote GPU server
 ```
 
-## Getting started
+## 🚀 Getting Started
 
-The client and server share the same dependency set. You can install the requirements into a Python
-3.10+ virtual environment:
+### Prerequisites
+
+- Python 3.10+
+- Microphone and audio output
+- API keys (see [ENV_SETUP.md](ENV_SETUP.md))
+
+### Installation
+
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/bilingual-voice-agent.git
+   cd bilingual-voice-agent
+   ```
+
+2. **Create virtual environment:**
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+
+3. **Install dependencies:**
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+4. **Configure environment:**
+   ```bash
+   cp .env.template .env
+   # Edit .env with your API keys and settings
+   ```
+   
+   See [ENV_SETUP.md](ENV_SETUP.md) for detailed configuration instructions.
+
+### Running the Client
+
+The client runs on your local machine and requires a remote server to be running:
 
 ```bash
-cd bilingual-voice-agent/
-cd test2/
+python voice_agent_minimal.py
+```
+
+**Requirements:**
+- `REMOTE_AGENT_URL` must be set in your `.env`
+- Remote server must be running and accessible
+- Microphone access
+
+**Usage:**
+1. Start the client
+2. Speak naturally into your microphone
+3. Pause briefly when you finish speaking
+4. Listen to the response
+
+### Running the Server
+
+Deploy on a GPU-capable machine (RunPod, Lambda Labs, etc.):
+
+```bash
+python server.py
+```
+
+Or using uvicorn:
+```bash
+uvicorn server:app --host 0.0.0.0 --port 8000
+```
+
+**Server provides two API endpoints:**
+- `POST /api/session` – Create a conversational session
+- `POST /api/process` – Process audio and return response
+- `GET /healthz` – Health check endpoint
+
+## 🔧 Configuration
+
+All configuration is done via environment variables. Copy `.env.template` to `.env` and fill in your values.
+
+### Essential Variables
+
+#### For Client:
+```bash
+REMOTE_AGENT_URL=https://your-server-url.proxy.runpod.net/
+REMOTE_AGENT_TOKEN=your_auth_token
+REMOTE_AGENT_API_KEY=your_groq_or_openai_key
+```
+
+#### For Server:
+```bash
+LLM_PROVIDER=groq
+GROQ_API_KEY=your_groq_api_key
+GROQ_MODEL=llama-3.3-70b-versatile
+WHISPER_MODEL=GoranS/whisper-base-1m.hr-ctranslate2
+WHISPER_DEVICE=cuda
+ELEVENLABS_API_KEY=your_elevenlabs_key
+REMOTE_SERVER_AUTH_TOKEN=your_auth_token
+```
+
+### Complete Configuration Reference
+
+| Category | Variable | Description | Default |
+|----------|----------|-------------|---------|
+| **LLM** | `LLM_PROVIDER` | `groq` or `openai` | `groq` |
+| | `GROQ_API_KEY` | Groq API key | - |
+| | `GROQ_MODEL` | Groq model name | `llama-3.3-70b-versatile` |
+| | `OPENAI_API_KEY` | OpenAI API key (if using OpenAI) | - |
+| | `OPENAI_MODEL` | OpenAI model name | `gpt-4o-mini` |
+| | `OPENAI_TEMPERATURE` | Sampling temperature | `0.3` |
+| | `OPENAI_MAX_TOKENS` | Max response tokens | `150` |
+| **STT** | `WHISPER_MODEL` | Whisper model identifier | `GoranS/whisper-base-1m.hr-ctranslate2` |
+| | `WHISPER_DEVICE` | `cpu` or `cuda` | `cuda` |
+| | `WHISPER_COMPUTE` | Compute precision | `float16` |
+| **TTS** | `ELEVENLABS_API_KEY` | ElevenLabs API key | - |
+| | `ELEVENLABS_VOICE_ID` | Voice ID to use | `vFQACl5nAIV0owAavYxE` |
+| **Remote** | `REMOTE_AGENT_URL` | Server base URL | - |
+| | `REMOTE_AGENT_TOKEN` | Auth token for server | - |
+| | `REMOTE_AGENT_API_KEY` | API key forwarded to server | - |
+| | `REMOTE_SERVER_AUTH_TOKEN` | Server-side auth token | - |
+| **VAD** | `SILENCE_TIMEOUT_SECS` | Silence duration to end turn | `0.2` |
+| | `MIN_SPEECH_SECS` | Minimum valid speech duration | `0.3` |
+| | `RMS_THRESH` | Volume threshold for speech | `0.003` |
+| | `RMS_HANGOVER` | Post-speech recording time | `0.12` |
+| | `FRAME_DURATION_MS` | Audio frame size | `10` |
+| **Memory** | `MAX_TURNS_IN_WINDOW` | Context window size | `8` |
+| | `SUMMARY_UPDATE_EVERY` | Summary update frequency | `8` |
+| **Audio** | `BEEP_DELAY_MS` | Wait-beep delay | `1000` |
+| | `PREFERRED_INPUT_NAME` | Audio device name substring | - |
+| | `INPUT_DEVICE_INDEX` | Specific device index | - |
+| **HTTP** | `HTTP_CONNECT_TIMEOUT` | Connection timeout | `2.0` |
+| | `HTTP_READ_TIMEOUT` | Read timeout | `30.0` |
+| | `PORT` | Server port | `8000` |
+
+For detailed configuration instructions, see [ENV_SETUP.md](ENV_SETUP.md).
+
+## 🎤 Audio Device Selection
+
+To list available audio devices:
+```python
+import sounddevice as sd
+print(sd.query_devices())
+```
+
+Then set in `.env`:
+```bash
+# Use device name substring
+PREFERRED_INPUT_NAME=USB
+
+# Or use specific device index
+INPUT_DEVICE_INDEX=1
+```
+
+## 🔐 Security
+
+**Important security practices:**
+
+1. **Never commit `.env`** - Contains sensitive API keys
+2. **Use strong auth tokens** - Generate secure random tokens:
+   ```bash
+   python -c "import secrets; print(secrets.token_urlsafe(32))"
+   ```
+3. **Match auth tokens** - `REMOTE_AGENT_TOKEN` (client) must equal `REMOTE_SERVER_AUTH_TOKEN` (server)
+4. **Rotate keys regularly** - Change API keys periodically
+5. **HTTPS only** - Use HTTPS for remote server URLs
+
+## 🐛 Troubleshooting
+
+### "REMOTE_AGENT_URL is not set" error
+- Ensure `.env` file exists in the project directory
+- Verify `REMOTE_AGENT_URL` is uncommented and set
+- Check for extra spaces or quotes
+
+### "Remote agent unavailable" error
+- Verify server is running: `curl https://your-url/healthz`
+- Check `REMOTE_AGENT_TOKEN` matches `REMOTE_SERVER_AUTH_TOKEN`
+- Ensure server URL ends with `/` (e.g., `https://example.com/`)
+
+### Audio device issues
+- List devices: `python -m sounddevice`
+- Set `INPUT_DEVICE_INDEX` or `PREFERRED_INPUT_NAME`
+- Check microphone permissions (especially on macOS)
+- Try running without `latency='low'` setting
+
+### Slow responses
+- Use Groq instead of OpenAI for faster inference
+- Use smaller model: `llama-3.1-8b-instant`
+- Reduce `OPENAI_MAX_TOKENS`
+- Check GPU availability on server
+
+### "Missing API key" errors
+- Verify all required keys are set in `.env`
+- Check for typos in variable names
+- Ensure no extra spaces around `=` in `.env`
+
+### Whisper model download issues
+- Enable fast downloads: `HF_HUB_ENABLE_HF_TRANSFER=1`
+- Install: `pip install hf_transfer`
+- Check internet connection
+- Verify model name is correct
+
+## 📚 API Reference
+
+### Server Endpoints
+
+#### `GET /healthz`
+Health check endpoint.
+
+**Response:**
+```json
+{
+  "status": "ok",
+  "llm_provider": "groq",
+  "llm_model": "llama-3.3-70b-versatile"
+}
+```
+
+#### `POST /api/session`
+Create a new conversation session.
+
+**Headers:**
+- `X-Auth`: Authentication token (if configured)
+- `X-API-Key`: Optional API key override
+
+**Response:**
+```json
+{
+  "session_id": "abc123..."
+}
+```
+
+#### `POST /api/process`
+Process audio and get response.
+
+**Form Data:**
+- `audio`: WAV file (PCM16, 16kHz, mono)
+- `session_id`: Session ID from `/api/session`
+- `api_key`: Optional API key override
+
+**Headers:**
+- `X-Auth`: Authentication token (if configured)
+
+**Response:**
+```json
+{
+  "session_id": "abc123...",
+  "text": "What you said",
+  "lang": "hr",
+  "assistant_text": "Response text",
+  "tts_audio_b64": "base64_encoded_audio",
+  "tts_sample_rate": 16000
+}
+```
+
+## 🤝 Contributing
+
+1. Fork the repository
+2. Create a feature branch: `git checkout -b feature-name`
+3. Make your changes
+4. Test locally with both client and server
+5. Commit: `git commit -am 'Add feature'`
+6. Push: `git push origin feature-name`
+7. Submit a pull request
+
+### Development Setup
+
+```bash
+# Clone your fork
+git clone https://github.com/yourusername/bilingual-voice-agent.git
+cd bilingual-voice-agent
+
+# Create virtual environment
 python -m venv venv
 source venv/bin/activate
+
+# Install dependencies
 pip install -r requirements.txt
+
+# Configure for local development
+cp .env.template .env
+# Edit .env with test API keys
 ```
 
-Create a `.env` file in the project root with the configuration relevant to the component you plan to
-run. See the environment variable reference below for details.
+## 📝 License
 
-### Running the local client
+[Add your license here]
 
-The client is designed to run on your laptop/desktop. It requires access to a microphone and audio
-output device:
+## 🙏 Acknowledgments
 
-```bash
-python -m voice_agent
-```
+- [Faster-Whisper](https://github.com/guillaumekln/faster-whisper) for speech recognition
+- [Groq](https://groq.com) for fast LLM inference
+- [ElevenLabs](https://elevenlabs.io) for text-to-speech
+- Croatian Whisper models by GoranS
 
-The client will refuse to start until you configure a remote server URL in your `.env` file (see
-`REMOTE_AGENT_URL`). While it listens for speech it provides a short “beep” if the remote server takes
-more than a couple of seconds to respond.
+## 📧 Support
 
-### Running the GPU server
+- **Issues**: [GitHub Issues](https://github.com/yourusername/bilingual-voice-agent/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/yourusername/bilingual-voice-agent/discussions)
+- **Documentation**: [ENV_SETUP.md](ENV_SETUP.md)
 
-Deploy the FastAPI application on a GPU-capable machine (RunPod, Lambda Labs, etc.). You can run it
-locally for development:
+---
 
-```bash
-uvicorn server.app:app --host 0.0.0.0 --port 8000
-```
-
-The server exposes two endpoints under `/api` that the client consumes:
-
-- `POST /api/session` – creates a conversational session and returns a `session_id`
-- `POST /api/process` – accepts a PCM16 WAV file and returns transcription, response text, and
-  optional TTS audio
-
-### Environment variables
-
-The project reads configuration from the environment (via [`python-dotenv`](https://saurabh-kumar.com/python-dotenv/)).
-Set the variables in a local `.env` file.
-
-#### Shared / client-side
-
-| Variable | Description |
-| --- | --- |
-| `REMOTE_AGENT_URL` | Base URL of the remote server (e.g. `https://example.runpod.run`) |
-| `REMOTE_AGENT_TOKEN` | Optional auth token that will be passed as the `X-Auth` header |
-| `REMOTE_AGENT_OPENAI_KEY` | Optional API key forwarded to the server for model access |
-| `FRAME_DURATION_MS` | Size of audio frames used by the VAD (default: `15`) |
-| `MAX_UTTERANCE_SECS` | Maximum length of a captured utterance (default: `45`) |
-| `SILENCE_TIMEOUT_SECS` | How long to wait before ending an utterance once silence is detected (default: `0.2`) |
-| `MIN_SPEECH_SECS` | Minimum duration of speech that counts as a valid utterance (default: `0.3`) |
-| `RMS_THRESH` | RMS threshold for VAD triggering (default: `0.003`) |
-| `RMS_HANGOVER` | Additional frames to keep recording after silence (default: `0.12`) |
-| `BEEP_DELAY_MS` | Delay before the waiting-beep is played (default: `2000`) |
-| `PREFERRED_INPUT_NAME` | Optional substring of the audio input device to use |
-| `INPUT_DEVICE_INDEX` | Explicit index of the audio input device to use |
-
-#### Server-side
-
-| Variable | Description |
-| --- | --- |
-| `LLM_PROVIDER` | `groq` (default) or `openai` |
-| `GROQ_API_KEY` / `OPENAI_API_KEY` | Default API key for the chosen provider |
-| `GROQ_MODEL` / `OPENAI_MODEL` | Model identifier to use for chat completions |
-| `ELEVENLABS_API_KEY` | API key for ElevenLabs TTS (optional but recommended) |
-| `ELEVENLABS_VOICE_ID` | Voice ID to use for ElevenLabs TTS |
-| `WHISPER_MODEL` | Faster-Whisper model name (default: `GoranS/whisper-base-1m.hr-ctranslate2`) |
-| `WHISPER_DEVICE` | `cpu` or `cuda` |
-| `WHISPER_COMPUTE` | Compute precision, e.g. `int8`, `float16` |
-| `OPENAI_TEMPERATURE` | Sampling temperature when generating responses (default: `0.3`) |
-| `OPENAI_MAX_TOKENS` | Max tokens for the response (default: `150`) |
-| `MAX_TURNS_IN_WINDOW` | Number of turns kept in the rolling context window (default: `8`) |
-| `SUMMARY_UPDATE_EVERY` | How frequently to refresh the long-term memory summary (default: `8`) |
-| `REMOTE_SERVER_AUTH_TOKEN` | Optional shared secret for protecting the API |
-| `PORT` | Port that the FastAPI application should bind to (default: `8000`) |
-
-### Troubleshooting
-
-- Use `python -m sounddevice` to list available audio devices if the client cannot select the right
-  microphone.
-- Set `REMOTE_AGENT_TOKEN` on both the client and server to protect the API when exposing it over the
-  internet.
-- The server caches language-model clients per API key. Restart the process if you rotate keys.
-
-## Contributing
-
-1. Fork and clone the repository.
-2. Create a feature branch and make your changes inside the `bilingual_voice_agent/test2` package.
-3. Run the client/server locally to ensure everything works as expected.
-4. Submit a pull request with a clear description of the changes.
+Made with ❤️ for bilingual voice interaction

@@ -1,0 +1,97 @@
+version: '3.8'
+
+services:
+  # Banking Voice Agent Server with RAG
+  voice-agent-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: banking-voice-agent
+    ports:
+      - "8000:8000"
+    environment:
+      # LLM Configuration
+      - LLM_PROVIDER=${LLM_PROVIDER:-groq}
+      - GROQ_API_KEY=${GROQ_API_KEY}
+      - GROQ_MODEL=${GROQ_MODEL:-llama-3.3-70b-versatile}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - OPENAI_MODEL=${OPENAI_MODEL:-gpt-4o-mini}
+      
+      # Voice Processing
+      - ELEVENLABS_API_KEY=${ELEVENLABS_API_KEY}
+      - ELEVENLABS_VOICE_ID=${ELEVENLABS_VOICE_ID:-vFQACl5nAIV0owAavYxE}
+      - WHISPER_MODEL=${WHISPER_MODEL:-GoranS/whisper-base-1m.hr-ctranslate2}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      
+      # RAG Configuration
+      - ENABLE_RAG=${ENABLE_RAG:-true}
+      - EMBEDDING_MODEL=${EMBEDDING_MODEL:-sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2}
+      - CHROMA_PERSIST_DIR=/app/data/chroma_db
+      
+      # Server Settings
+      - PORT=8000
+      - REMOTE_SERVER_AUTH_TOKEN=${REMOTE_SERVER_AUTH_TOKEN}
+    
+    volumes:
+      # Persist ChromaDB data
+      - ./data/chroma_db:/app/data/chroma_db
+      # Mount code for development (optional, remove for production)
+      - ./rag_banking_module.py:/app/rag_banking_module.py:ro
+      - ./remote_agent_with_rag.py:/app/remote_agent_with_rag.py:ro
+    
+    restart: unless-stopped
+    
+    # Resource limits (adjust based on your needs)
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 4G
+        reservations:
+          cpus: '1'
+          memory: 2G
+    
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/healthz"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: ChromaDB standalone server for production
+  # Uncomment if you want a separate ChromaDB instance
+  # chromadb:
+  #   image: chromadb/chroma:latest
+  #   container_name: chromadb
+  #   ports:
+  #     - "8001:8000"
+  #   volumes:
+  #     - ./data/chromadb:/chroma/chroma
+  #   environment:
+  #     - IS_PERSISTENT=TRUE
+  #     - PERSIST_DIRECTORY=/chroma/chroma
+  #     - ANONYMIZED_TELEMETRY=FALSE
+  #   restart: unless-stopped
+
+  # Optional: Nginx reverse proxy for production
+  # nginx:
+  #   image: nginx:alpine
+  #   container_name: nginx-proxy
+  #   ports:
+  #     - "80:80"
+  #     - "443:443"
+  #   volumes:
+  #     - ./nginx.conf:/etc/nginx/nginx.conf:ro
+  #     - ./ssl:/etc/nginx/ssl:ro
+  #   depends_on:
+  #     - voice-agent-server
+  #   restart: unless-stopped
+
+volumes:
+  chroma_data:
+    driver: local
+
+networks:
+  default:
+    name: banking-voice-network
+    driver: bridge

@@ -38,7 +38,14 @@ DEFAULT_OPENAI_API_KEY = os.getenv("OPENAI_API_KEY", "").strip()
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY", "")
 ELEVENLABS_VOICE_ID = os.getenv("ELEVENLABS_VOICE_ID", "vFQACl5nAIV0owAavYxE")
 
-WHISPER_MODEL = os.getenv("WHISPER_MODEL", "GoranS/whisper-base-1m.hr-ctranslate2")
+SERVER_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(SERVER_DIR)  # goes up from test2/ → bilingual-voice-agent/
+DEFAULT_LOCAL_WHISPER_PATH = os.path.join(
+    PROJECT_ROOT,
+    "models",
+    "whisper-large-v3-turbo-hr-parla-ctranslate2"
+)
+WHISPER_MODEL = os.getenv("WHISPER_MODEL", DEFAULT_LOCAL_WHISPER_PATH)
 WHISPER_DEVICE = os.getenv("WHISPER_DEVICE", "cpu")
 WHISPER_COMPUTE = os.getenv("WHISPER_COMPUTE", "int8")
 

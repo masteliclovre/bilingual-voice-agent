@@ -2,6 +2,13 @@
 
 A bilingual (Croatian/English) voice assistant that captures audio from your microphone, processes it through a remote GPU-backed server, and plays back synthesized speech responses. The system intelligently detects which language you're speaking and responds in the same language.
 
+> **Note:**  
+> This project includes a locally stored copy of the Croatian Whisper speech-to-text model  
+> **`whisper-large-v3-turbo-hr-parla`**  
+> originally published by **GoranS** under the **Apache 2.0 License**.  
+> The model is no longer available on Hugging Face, so it is distributed within this repository with proper attribution.
+
+
 ## 🎯 Features
 
 - **Bilingual support** - Seamlessly handles Croatian and English
@@ -38,6 +45,9 @@ bilingual-voice-agent/
 │   ├── server.py                 # Remote GPU server
 |   ├── .env.template             # Environment variable template
 │   └── .gitignore
+|
+└──models/
+    └──whisper-large-v3-turbo-hr-parla-ctranslate2
 ```
 
 ## 🚀 Getting Started

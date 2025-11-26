@@ -18,6 +18,7 @@ from pathlib import Path
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from faster_whisper import WhisperModel
 from openai import OpenAI
 from elevenlabs import ElevenLabs
@@ -360,6 +361,20 @@ def elevenlabs_tts_pcm(el: ElevenLabs, text: str) -> bytes:
     return bytes(pcm)
 
 
+def elevenlabs_tts_stream(el: ElevenLabs, text: str):
+    """Stream TTS audio chunks as they're generated."""
+    audio_gen = el.text_to_speech.convert(
+        voice_id=ELEVENLABS_VOICE_ID,
+        optimize_streaming_latency="2",
+        output_format="pcm_16000",
+        text=text,
+        model_id="eleven_multilingual_v2",
+    )
+    for chunk in audio_gen:
+        if chunk:
+            yield chunk
+
+
 @dataclass
 class SessionState:
     memory: EnhancedMemory
@@ -528,6 +543,111 @@ async def process_turn(
         "rag_topic": state.memory.last_rag_match.topic if state.memory.last_rag_match else None,
         "rag_confidence": state.memory.last_rag_match.confidence if state.memory.last_rag_match else 0.0,
     }
+
+
+@app.post("/api/process_stream")
+async def process_turn_stream(
+    audio: UploadFile = File(...),
+    session_id: Optional[str] = Form(None),
+    _: None = Depends(require_auth),
+    x_api_key: Optional[str] = Header(None),
+    api_key: Optional[str] = Form(None),
+):
+    """Process audio turn with streaming TTS response."""
+    audio_bytes = await audio.read()
+    if not audio_bytes:
+        raise HTTPException(status_code=400, detail="Empty audio payload")
+
+    api_key_override = api_key or x_api_key
+    try:
+        session_id, state = get_session(session_id, api_key_override)
+    except RuntimeError as exc:
+        raise HTTPException(status_code=500, detail=str(exc))
+
+    wav_buf = io.BytesIO(audio_bytes)
+    user_text, lang = whisper_transcribe(whisper_model, wav_buf)
+
+    if not user_text:
+        # Return empty response for silence
+        async def empty_stream():
+            yield b""
+        return StreamingResponse(
+            empty_stream(),
+            media_type="application/octet-stream",
+            headers={
+                "X-Session-ID": session_id,
+                "X-User-Text": "",
+                "X-Lang": lang or "",
+                "X-Assistant-Text": "",
+                "X-RAG-Used": "false",
+            }
+        )
+
+    with state.lock:
+        state.memory.add_user(user_text)
+
+        # Check if RAG can provide direct answer
+        direct_answer = state.memory.get_direct_rag_answer(user_text, lang)
+
+        if direct_answer:
+            # Use direct RAG answer without LLM
+            assistant_text = direct_answer
+            state.rag_hits += 1
+            rag_used = True
+        else:
+            # Build prompt with RAG context and use LLM
+            messages = state.memory.build_prompt(user_text, lang)
+            assistant_text = state.memory.llm.complete(messages)
+            rag_used = bool(state.memory.last_rag_match)
+            if rag_used:
+                state.rag_hits += 1
+
+        state.memory.add_assistant(assistant_text)
+        state.memory.maybe_summarize()
+        state.last_lang = lang or state.last_lang
+        state.turns += 1
+
+    # Stream TTS audio chunks
+    if not eleven_client:
+        # No TTS available, return empty stream
+        async def empty_stream():
+            yield b""
+        return StreamingResponse(
+            empty_stream(),
+            media_type="application/octet-stream",
+            headers={
+                "X-Session-ID": session_id,
+                "X-User-Text": user_text,
+                "X-Lang": lang or state.last_lang or "",
+                "X-Assistant-Text": assistant_text,
+                "X-RAG-Used": str(rag_used).lower(),
+                "X-RAG-Topic": state.memory.last_rag_match.topic if state.memory.last_rag_match else "",
+                "X-RAG-Confidence": str(state.memory.last_rag_match.confidence) if state.memory.last_rag_match else "0.0",
+            }
+        )
+
+    def audio_stream():
+        """Generator that yields TTS audio chunks."""
+        try:
+            for chunk in elevenlabs_tts_stream(eleven_client, assistant_text):
+                yield chunk
+        except Exception as exc:
+            print(f"TTS streaming error: {exc}")
+            yield b""
+
+    return StreamingResponse(
+        audio_stream(),
+        media_type="application/octet-stream",
+        headers={
+            "X-Session-ID": session_id,
+            "X-User-Text": user_text,
+            "X-Lang": lang or state.last_lang or "",
+            "X-Assistant-Text": assistant_text,
+            "X-RAG-Used": str(rag_used).lower(),
+            "X-RAG-Topic": state.memory.last_rag_match.topic if state.memory.last_rag_match else "",
+            "X-RAG-Confidence": str(state.memory.last_rag_match.confidence) if state.memory.last_rag_match else "0.0",
+        }
+    )
 
 
 if __name__ == "__main__":

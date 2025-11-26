@@ -512,6 +512,75 @@ class RemoteAgentClient:
         
         raise RuntimeError("Remote agent unavailable after retries")
 
+    def process_stream(self, wav_buf: io.BytesIO, out: OutputAudio) -> Optional[RemoteAgentResult]:
+        """Send audio to remote agent and stream TTS response back."""
+        payload = wav_buf.getvalue()
+        if not payload:
+            return None
+
+        attempts = 0
+        while attempts < 2:
+            attempts += 1
+            self.ensure_session()
+
+            files = {"audio": ("audio.wav", payload, "audio/wav")}
+            data = {"session_id": self.session_id}
+            if self.openai_api_key:
+                data["openai_api_key"] = self.openai_api_key
+
+            resp = self.session.post(
+                f"{self.base_url}/process_stream",
+                headers=self._headers(),
+                files=files,
+                data=data,
+                timeout=HTTP_TIMEOUT,
+                stream=True,  # Enable streaming
+            )
+
+            if resp.status_code in (401, 403):
+                raise RuntimeError("Remote agent authentication failed")
+
+            if resp.status_code in (404, 410):
+                self.session_id = None
+                continue
+
+            resp.raise_for_status()
+
+            # Extract metadata from headers
+            session_id = resp.headers.get("X-Session-ID")
+            user_text = resp.headers.get("X-User-Text", "")
+            assistant_text = resp.headers.get("X-Assistant-Text", "")
+            lang = resp.headers.get("X-Lang") or None
+            rag_used = resp.headers.get("X-RAG-Used", "false") == "true"
+
+            if session_id:
+                self.session_id = session_id
+
+            # Stream audio chunks and play immediately
+            audio_chunks = []
+            for chunk in resp.iter_content(chunk_size=8192):
+                if chunk:
+                    # Play immediately for low latency
+                    out.write_int16_bytes(chunk)
+                    # Also collect for return value
+                    audio_chunks.append(chunk)
+
+            # Combine all chunks
+            audio_bytes = b"".join(audio_chunks)
+
+            return RemoteAgentResult(
+                user_text=user_text,
+                assistant_text=assistant_text,
+                lang=lang,
+                audio_pcm16=audio_bytes,
+                sample_rate=TARGET_SR,
+                session_id=self.session_id,
+                skipped=False,
+                reason=None,
+            )
+
+        raise RuntimeError("Remote agent unavailable after retries")
+
 
 # =========================
 # Main Loop
@@ -573,10 +642,10 @@ def main():
                 )
                 feedback_process.start()
                 
-                # Send to remote agent (happens in parallel, no GIL interference)
+                # Send to remote agent and stream response (happens in parallel, no GIL interference)
                 try:
-                    with tracker.track("remote_agent"):
-                        result = remote_client.process(wav_buf)
+                    with tracker.track("remote_agent_and_playback"):
+                        result = remote_client.process_stream(wav_buf, out)
                 except Exception as e:
                     exception = e
                 finally:
@@ -585,32 +654,24 @@ def main():
                     feedback_process.join(timeout=0.5)
                     if feedback_process.is_alive():
                         feedback_process.terminate()
-                
+
                 # Handle any exception from remote agent
                 if exception:
                     print(f"❌ Remote agent error: {exception}")
                     tracker.report()
                     continue
-                
+
                 if not result or not result.user_text:
                     tracker.report("⏱️ Turn skipped (remote empty)")
                     continue
-                
+
                 # Display results
                 flag = "🇭🇷" if (result.lang or "").startswith("hr") else "🇬🇧"
                 print(f"{flag} You: {result.user_text}")
                 print(f"🤖 Assistant: {result.assistant_text}")
-                
-                # Play response audio
-                if result.audio_pcm16:
-                    with tracker.track("playback"):
-                        if result.sample_rate != TARGET_SR:
-                            pcm = np.frombuffer(result.audio_pcm16, dtype=np.int16).astype(np.float32) / 32768.0
-                            pcm_16k = resample_to_16k(pcm, result.sample_rate)
-                            out.write_float_np(pcm_16k)
-                        else:
-                            out.write_int16_bytes(result.audio_pcm16)
-                else:
+
+                # Audio already played during streaming - no need to play again
+                if not result.audio_pcm16:
                     print("⚠️ (Remote agent returned no audio)")
                 
                 tracker.report()

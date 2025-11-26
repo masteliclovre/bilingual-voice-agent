@@ -1,0 +1,144 @@
+{
+  "greeting": {
+    "patterns": [
+      "\\b(hello|hi|hey|good morning|good afternoon)\\b",
+      "\\b(bok|pozdrav|dobar dan|zdravo|ćao)\\b"
+    ],
+    "keywords": ["hello", "hi", "hey", "bok", "pozdrav", "dobar dan"],
+    "responses": {
+      "hr": "Pozdrav! Ja sam vaš virtualni asistent. Kako vam mogu pomoći danas?",
+      "en": "Hello! I'm your virtual assistant. How can I help you today?"
+    },
+    "priority": 10
+  },
+
+  "hours": {
+    "patterns": [
+      "\\b(working hours|business hours|when.*open|opening hours)\\b",
+      "\\b(radno vrijeme|kada.*otvoreno|u koliko sati)\\b"
+    ],
+    "keywords": ["hours", "open", "vrijeme", "otvoreno", "working"],
+    "responses": {
+      "hr": "Naše radno vrijeme je: Ponedjeljak-Petak 8:00-20:00, Subota 9:00-14:00. Nedjelja zatvoreno.",
+      "en": "Our working hours are: Monday-Friday 8:00-20:00, Saturday 9:00-14:00. Closed on Sunday."
+    },
+    "priority": 8
+  },
+
+  "contact": {
+    "patterns": [
+      "\\b(contact|email|phone|call|reach)\\b",
+      "\\b(kontakt|email|telefon|broj|zvati|dohvat)\\b"
+    ],
+    "keywords": ["contact", "email", "phone", "kontakt", "telefon"],
+    "responses": {
+      "hr": "Možete nas kontaktirati na: Telefon: 0800-1234 (besplatno), Email: info@company.com, ili posjetite naš ured na adresi Ulica 123, Zagreb.",
+      "en": "You can contact us at: Phone: 0800-1234 (toll-free), Email: info@company.com, or visit our office at Street 123, Zagreb."
+    },
+    "priority": 9
+  },
+
+  "pricing": {
+    "patterns": [
+      "\\b(price|cost|how much|pricing|fee)\\b",
+      "\\b(cijena|košta|koliko|naknada|trošak)\\b"
+    ],
+    "keywords": ["price", "cost", "cijena", "košta", "fee"],
+    "responses": {
+      "hr": "Naše cijene variraju ovisno o usluzi. Osnovni paket počinje od 99 kn mjesečno. Za detaljnu ponudu, molimo kontaktirajte naš tim.",
+      "en": "Our prices vary depending on the service. Basic package starts at 99 kn per month. For a detailed quote, please contact our team."
+    },
+    "priority": 7
+  },
+
+  "support": {
+    "patterns": [
+      "\\b(help|support|problem|issue|not working)\\b",
+      "\\b(pomoć|podrška|problem|ne radi|greška)\\b"
+    ],
+    "keywords": ["help", "support", "problem", "pomoć", "podrška"],
+    "responses": {
+      "hr": "Žao mi je čuti da imate poteškoća. Naš tehnički tim je dostupan 24/7. Molim vas opišite svoj problem, ili nazovite naš support na 0800-5678.",
+      "en": "I'm sorry to hear you're having trouble. Our technical team is available 24/7. Please describe your issue, or call our support at 0800-5678."
+    },
+    "priority": 9
+  },
+
+  "shipping": {
+    "patterns": [
+      "\\b(shipping|delivery|when.*arrive|tracking)\\b",
+      "\\b(dostava|isporuka|kada.*stići|praćenje)\\b"
+    ],
+    "keywords": ["shipping", "delivery", "dostava", "isporuka"],
+    "responses": {
+      "hr": "Standardna dostava traje 2-3 radna dana. Brza dostava je dostupna uz nadoplatu (24h). Dobit ćete tracking broj putem email-a.",
+      "en": "Standard delivery takes 2-3 business days. Express delivery available for extra fee (24h). You'll receive a tracking number via email."
+    },
+    "priority": 7
+  },
+
+  "returns": {
+    "patterns": [
+      "\\b(return|refund|money back|cancel order)\\b",
+      "\\b(povrat|refundacija|vrati.*novac|otkaži.*narudžb)\\b"
+    ],
+    "keywords": ["return", "refund", "povrat", "otkazivanje"],
+    "responses": {
+      "hr": "Nudimo povrat robe u roku od 14 dana. Proizvod mora biti neoštećen i u originalnom pakovanju. Puni povrat novca u roku od 5-7 dana.",
+      "en": "We offer returns within 14 days. Product must be undamaged and in original packaging. Full refund within 5-7 days."
+    },
+    "priority": 8
+  },
+
+  "payment": {
+    "patterns": [
+      "\\b(payment.*method|how.*pay|credit card|paypal)\\b",
+      "\\b(način.*plaćanj|kako.*platit|kartic|paypal)\\b"
+    ],
+    "keywords": ["payment", "pay", "plaćanje", "kartica"],
+    "responses": {
+      "hr": "Prihvaćamo: Kreditne/debitne kartice (Visa, Mastercard), PayPal, virman, i gotovina pri preuzimanju.",
+      "en": "We accept: Credit/debit cards (Visa, Mastercard), PayPal, bank transfer, and cash on delivery."
+    },
+    "priority": 7
+  },
+
+  "location": {
+    "patterns": [
+      "\\b(location|address|where.*located|find you)\\b",
+      "\\b(lokacija|adresa|gdje.*nalazit|pronaći)\\b"
+    ],
+    "keywords": ["location", "address", "lokacija", "adresa"],
+    "responses": {
+      "hr": "Nalazimo se na adresi: Ulica 123, 10000 Zagreb. Blizu glavnog trga, pored pošte.",
+      "en": "We're located at: Street 123, 10000 Zagreb. Near the main square, next to the post office."
+    },
+    "priority": 7
+  },
+
+  "thanks": {
+    "patterns": [
+      "\\b(thank|thanks|appreciate)\\b",
+      "\\b(hvala|zahval|fala)\\b"
+    ],
+    "keywords": ["thank", "thanks", "hvala"],
+    "responses": {
+      "hr": "Nema na čemu! Rado pomažem. Imate li još neko pitanje?",
+      "en": "You're welcome! Happy to help. Do you have any other questions?"
+    },
+    "priority": 6
+  },
+
+  "goodbye": {
+    "patterns": [
+      "\\b(bye|goodbye|see you|talk later)\\b",
+      "\\b(doviđenja|ćao|vidimo se|adio)\\b"
+    ],
+    "keywords": ["bye", "goodbye", "doviđenja"],
+    "responses": {
+      "hr": "Doviđenja! Lijepo mi je bilo razgovarati s vama. Obratite nam se opet!",
+      "en": "Goodbye! It was nice talking to you. Feel free to reach out again!"
+    },
+    "priority": 6
+  }
+}

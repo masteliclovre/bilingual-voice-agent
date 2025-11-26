@@ -1,6 +1,8 @@
-"""
-Enhanced FastAPI server with RAG integration for bilingual banking voice agent.
-This extends the original remote_agent.py with vector database support.
+"""FastAPI server with Smart RAG - bilingual voice agent with knowledge base.
+
+Run this on any GPU host (Runpod, etc.) and point REMOTE_AGENT_URL from the
+voice_agent.py client to this server. The server keeps per-session memory and
+uses Smart RAG for instant knowledge retrieval.
 """
 
 import numpy as np
@@ -11,6 +13,7 @@ import threading
 import uuid
 from dataclasses import dataclass, field
 from typing import Dict, Optional
+from pathlib import Path
 
 from dotenv import load_dotenv
 from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Header
@@ -19,13 +22,13 @@ from faster_whisper import WhisperModel
 from openai import OpenAI
 from elevenlabs import ElevenLabs
 
-# Import RAG module
-from rag_banking_module import RAGBankingAssistant, BankingDocument
+# Import Smart RAG
+from smart_rag import SmartRAG
 
 load_dotenv()
 
 # =========================
-# Config (mirrors voice_agent.py)
+# Config
 # =========================
 
 # LLM Provider configuration
@@ -54,15 +57,16 @@ LLM_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
 MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "8"))
 SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "8"))
 
-# RAG Configuration
+# Smart RAG Configuration
 ENABLE_RAG = os.getenv("ENABLE_RAG", "true").lower() == "true"
-RAG_CONFIDENCE_THRESHOLD = float(os.getenv("RAG_CONFIDENCE_THRESHOLD", "0.7"))
+KNOWLEDGE_PATH = os.getenv("KNOWLEDGE_PATH", "knowledge.json")
+RAG_DIRECT_ANSWER = os.getenv("RAG_DIRECT_ANSWER", "false").lower() == "true"
 
 TARGET_SR = 16000
 
 SERVER_AUTH_TOKEN = os.getenv("REMOTE_SERVER_AUTH_TOKEN", "").strip() or None
 
-app = FastAPI(title="Bilingual Banking Voice Agent with RAG")
+app = FastAPI(title="Bilingual Voice Agent with Smart RAG")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -72,20 +76,28 @@ app.add_middleware(
 )
 
 # =========================
-# Initialize RAG Assistant
+# Initialize Smart RAG
 # =========================
 
-rag_assistant = None
+smart_rag = None
 if ENABLE_RAG:
     try:
-        rag_assistant = RAGBankingAssistant()
-        print("✓ RAG Banking Assistant initialized")
+        knowledge_file = Path(KNOWLEDGE_PATH)
+        if knowledge_file.exists():
+            smart_rag = SmartRAG(knowledge_path=str(knowledge_file))
+            print(f"✓ Smart RAG initialized with {len(smart_rag.knowledge_base)} topics")
+        else:
+            smart_rag = SmartRAG()
+            print("✓ Smart RAG initialized with default knowledge base")
+            # Save default knowledge base for reference
+            smart_rag.save_knowledge("knowledge.json")
     except Exception as e:
-        print(f"⚠️ RAG initialization failed: {e}")
+        print(f"⚠️ Smart RAG initialization failed: {e}")
         print("Continuing without RAG support...")
+        smart_rag = None
 
 # =========================
-# Utilities shared with voice_agent
+# Utilities
 # =========================
 
 
@@ -97,7 +109,7 @@ def load_whisper():
         num_workers=1,
     )
     model = WhisperModel(WHISPER_MODEL, **kwargs)
-    
+
     # GPU warmup
     if WHISPER_DEVICE == "cuda":
         print("Warming up GPU...")
@@ -107,7 +119,7 @@ def load_whisper():
             print("✓ GPU warmup complete")
         except Exception as e:
             print(f"Warmup warning: {e}")
-    
+
     return model
 
 
@@ -135,7 +147,7 @@ def whisper_transcribe(whisper: WhisperModel, wav_buf: io.BytesIO):
     audio = np.frombuffer(pcm, dtype=np.int16).astype(np.float32) / 32768.0
     if sr != TARGET_SR:
         audio = resample_to_16k(audio, sr)
-    
+
     segments, info = whisper.transcribe(
         audio=audio,
         beam_size=1,
@@ -159,11 +171,11 @@ class LLMClient:
         api_key = api_key.strip()
         if not api_key:
             raise RuntimeError(f"Missing API key for {provider} LLM provider.")
-        
+
         self.api_key = api_key
         self.provider = provider
         self.model = LLM_MODEL
-        
+
         # Configure client based on provider
         if provider == "groq":
             self.client = OpenAI(
@@ -186,20 +198,15 @@ class LLMClient:
 
 
 class EnhancedMemory:
-    """Memory class with RAG integration for banking context."""
-    
-    def __init__(self, llm: LLMClient, rag: Optional[RAGBankingAssistant] = None):
+    """Memory class with Smart RAG integration."""
+
+    def __init__(self, llm: LLMClient, rag: Optional[SmartRAG] = None):
         self.llm = llm
         self.rag = rag
         self.summary = ""
         self.window = []
         self.user_turns_since_summary = 0
-        self.last_rag_sources = []
-        self.conversation_context = {
-            "topics_discussed": [],
-            "user_intents": [],
-            "pending_tasks": []
-        }
+        self.last_rag_match = None
 
     def add_user(self, content: str):
         self.window.append({"role": "user", "content": content})
@@ -218,9 +225,8 @@ class EnhancedMemory:
         if self.user_turns_since_summary < SUMMARY_UPDATE_EVERY:
             return
         sys_prompt = (
-            "You are a memory compressor for a banking assistant. Summarize the following conversation "
-            "into concise bullet points capturing user's banking needs, account preferences, "
-            "completed actions, and pending requests. Keep neutral tone. Max ~150 words."
+            "You are a memory compressor. Summarize the following conversation into concise bullet points "
+            "capturing user preferences, facts, goals, and unresolved tasks. Keep neutral tone. Max ~150 words."
         )
         msgs = [{"role": "system", "content": sys_prompt}]
         if self.summary:
@@ -233,83 +239,86 @@ class EnhancedMemory:
         except Exception as exc:
             print("Memory summarize error:", exc)
 
-    def build_prompt_with_rag(self, user_message: str, user_lang_hint: Optional[str]):
-        """Build prompt with RAG-augmented context."""
-        
-        # Detect if this is a banking-related query
-        is_banking_query = self._is_banking_related(user_message)
-        
-        # Get RAG context if available and relevant
-        rag_context = ""
-        if self.rag and is_banking_query:
+    def build_prompt(self, user_text: str, user_lang_hint: Optional[str]):
+        """Build prompt with Smart RAG integration."""
+
+        # Try RAG matching first
+        rag_matched = False
+        rag_response = None
+
+        if self.rag and user_text:
             try:
-                context, sources = self.rag.generate_context(user_message, user_lang_hint)
-                if context:
-                    rag_context = context
-                    self.last_rag_sources = sources
+                match = self.rag.match(user_text, user_lang_hint)
+                if match.matched:
+                    rag_matched = True
+                    self.last_rag_match = match
+
+                    # Get language-specific response
+                    lang = user_lang_hint or self.rag.detect_language(user_text)
+                    rag_response = match.response_hr if lang == "hr" else match.response_en
+
+                    # If RAG_DIRECT_ANSWER mode, return RAG response directly without LLM
+                    if RAG_DIRECT_ANSWER and rag_response:
+                        # Still build system prompt for consistency
+                        return self._build_system_prompt(user_lang_hint, rag_context=rag_response)
             except Exception as e:
-                print(f"RAG error: {e}")
-        
-        # Build system prompt
-        if user_lang_hint and user_lang_hint.startswith("hr"):
+                print(f"RAG matching error: {e}")
+
+        # Build standard prompt (with or without RAG context)
+        return self._build_system_prompt(user_lang_hint, rag_context=rag_response)
+
+    def _build_system_prompt(self, user_lang_hint: Optional[str], rag_context: Optional[str] = None):
+        """Build system prompt with optional RAG context."""
+
+        # Base system message
+        if (user_lang_hint or "").startswith("hr"):
             system = (
-                "Ti si stručni bankarski savjetnik koji govori hrvatski i engleski. "
+                "Ti si ljubazan i stručan virtualni asistent. "
                 "UVIJEK odgovori na istom jeziku na kojem korisnik pita. "
                 "Daj kratke, jasne odgovore prikladne za glas (2-5 rečenica). "
-                "Koristi formalan ali prijateljski ton. "
             )
-            if rag_context:
-                system += "\n\nAktualne bankarske informacije:\n" + rag_context
         else:
             system = (
-                "You are a professional banking advisor fluent in Croatian and English. "
+                "You are a friendly and professional virtual assistant. "
                 "ALWAYS reply in the same language the user speaks. "
                 "Keep answers short and clear for voice (2-5 sentences). "
-                "Use formal but friendly tone. "
             )
-            if rag_context:
-                system += "\n\nCurrent banking information:\n" + rag_context
-        
+
+        # Add RAG context if available
+        if rag_context:
+            if (user_lang_hint or "").startswith("hr"):
+                system += f"\n\nKONTEKST IZ BAZE ZNANJA:\n{rag_context}\n\nKoristi ovaj kontekst za odgovor, ali možeš dodati dodatne informacije ako je potrebno."
+            else:
+                system += f"\n\nCONTEXT FROM KNOWLEDGE BASE:\n{rag_context}\n\nUse this context for your answer, but you can add extra information if needed."
+
         msgs = [{"role": "system", "content": system}]
-        
+
         # Add conversation summary if exists
         if self.summary:
-            if user_lang_hint and user_lang_hint.startswith("hr"):
+            if (user_lang_hint or "").startswith("hr"):
                 msgs.append({"role": "system", "content": f"Sažetak prethodnog razgovora:\n{self.summary}"})
             else:
                 msgs.append({"role": "system", "content": f"Previous conversation summary:\n{self.summary}"})
-        
+
         # Add conversation window
         msgs.extend(self.window)
-        
+
         return msgs
 
-    def _is_banking_related(self, message: str) -> bool:
-        """Check if message is banking-related."""
-        banking_keywords = [
-            # Croatian
-            "račun", "kredit", "kartica", "plaćanje", "novac", "štednja",
-            "kamata", "transfer", "uplata", "isplata", "saldo", "stanje",
-            "bankomat", "banka", "naknada", "troškovi",
-            # English
-            "account", "credit", "card", "payment", "money", "savings",
-            "interest", "transfer", "deposit", "withdrawal", "balance",
-            "atm", "bank", "fee", "charge", "loan", "mortgage"
-        ]
-        
-        message_lower = message.lower()
-        return any(keyword in message_lower for keyword in banking_keywords)
+    def get_direct_rag_answer(self, user_text: str, lang: Optional[str]) -> Optional[str]:
+        """Get direct answer from RAG without LLM (if RAG_DIRECT_ANSWER mode)."""
+        if not self.rag or not RAG_DIRECT_ANSWER:
+            return None
 
-    def build_prompt(self, user_lang_hint: Optional[str]):
-        """Legacy method - redirects to RAG-enabled version."""
-        # Get the last user message for RAG context
-        last_user_msg = ""
-        for msg in reversed(self.window):
-            if msg["role"] == "user":
-                last_user_msg = msg["content"]
-                break
-        
-        return self.build_prompt_with_rag(last_user_msg, user_lang_hint)
+        try:
+            match = self.rag.match(user_text, lang)
+            if match.matched:
+                self.last_rag_match = match
+                return match.response_hr if lang == "hr" else match.response_en
+        except Exception as e:
+            print(f"RAG direct answer error: {e}")
+
+        return None
 
 
 def init_elevenlabs() -> Optional[ElevenLabs]:
@@ -324,10 +333,10 @@ def get_llm_client(api_key_override: Optional[str]) -> LLMClient:
         key = (api_key_override or DEFAULT_GROQ_API_KEY).strip()
     else:
         key = (api_key_override or DEFAULT_OPENAI_API_KEY).strip()
-    
+
     if not key:
         raise RuntimeError(f"Missing API key for {LLM_PROVIDER} LLM provider.")
-    
+
     cache_key = f"{LLM_PROVIDER}:{key}"
     if cache_key not in llm_clients:
         llm_clients[cache_key] = LLMClient(key, LLM_PROVIDER)
@@ -357,6 +366,7 @@ class SessionState:
     api_key: str
     last_lang: Optional[str] = None
     turns: int = 0
+    rag_hits: int = 0
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -374,8 +384,7 @@ def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> t
     llm_client = get_llm_client(api_key_override)
     if not session_id or session_id not in sessions:
         session_id = uuid.uuid4().hex
-        # Create memory with RAG support
-        memory = EnhancedMemory(llm_client, rag_assistant)
+        memory = EnhancedMemory(llm_client, smart_rag)
         sessions[session_id] = SessionState(memory=memory, api_key=llm_client.api_key)
     else:
         state = sessions[session_id]
@@ -388,65 +397,43 @@ def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> t
 
 @app.get("/healthz")
 def healthz():
-    rag_status = "enabled" if rag_assistant else "disabled"
+    rag_status = "enabled" if smart_rag else "disabled"
+    rag_topics = len(smart_rag.knowledge_base) if smart_rag else 0
     return {
         "status": "ok",
         "llm_provider": LLM_PROVIDER,
         "llm_model": LLM_MODEL,
-        "rag": rag_status
+        "rag": rag_status,
+        "rag_topics": rag_topics
     }
 
 
 @app.get("/api/rag/stats")
 def get_rag_stats(_: None = Depends(require_auth)):
-    """Get RAG knowledge base statistics."""
-    if not rag_assistant:
-        raise HTTPException(status_code=503, detail="RAG not available")
-    
-    return rag_assistant.get_statistics()
+    """Get Smart RAG statistics."""
+    if not smart_rag:
+        raise HTTPException(status_code=503, detail="RAG not enabled")
+
+    return smart_rag.get_stats()
 
 
-@app.post("/api/rag/search")
-def search_knowledge_base(
-    query: str = Form(...),
-    lang: Optional[str] = Form(None),
-    _: None = Depends(require_auth)
-):
-    """Search the knowledge base directly."""
-    if not rag_assistant:
-        raise HTTPException(status_code=503, detail="RAG not available")
-    
-    results = rag_assistant.search(query)
-    return {
-        "query": query,
-        "detected_language": rag_assistant.detect_language(query) if not lang else lang,
-        "results": results
-    }
+@app.get("/api/rag/topics")
+def list_rag_topics(_: None = Depends(require_auth)):
+    """List all available RAG topics."""
+    if not smart_rag:
+        raise HTTPException(status_code=503, detail="RAG not enabled")
 
+    topics = []
+    for topic_id, data in smart_rag.knowledge_base.items():
+        topics.append({
+            "id": topic_id,
+            "keywords": data.get("keywords", []),
+            "priority": data.get("priority", 5),
+            "has_hr": "hr" in data.get("responses", {}),
+            "has_en": "en" in data.get("responses", {})
+        })
 
-@app.post("/api/rag/add_document")
-async def add_document(
-    content_hr: str = Form(...),
-    content_en: str = Form(...),
-    category: str = Form(...),
-    keywords: str = Form(...),
-    _: None = Depends(require_auth)
-):
-    """Add new document to knowledge base."""
-    if not rag_assistant:
-        raise HTTPException(status_code=503, detail="RAG not available")
-    
-    doc = BankingDocument(
-        id=f"custom_{uuid.uuid4().hex[:8]}",
-        content_hr=content_hr,
-        content_en=content_en,
-        category=category,
-        keywords=keywords.split(","),
-        metadata={"source": "api", "timestamp": datetime.now().isoformat()}
-    )
-    
-    rag_assistant.add_document(doc)
-    return {"status": "success", "document_id": doc.id}
+    return {"topics": topics}
 
 
 @app.post("/api/session")
@@ -459,7 +446,10 @@ def create_session(
         session_id, _ = get_session(None, x_api_key)
     except RuntimeError as exc:
         raise HTTPException(status_code=500, detail=str(exc))
-    return {"session_id": session_id, "rag_enabled": bool(rag_assistant)}
+    return {
+        "session_id": session_id,
+        "rag_enabled": bool(smart_rag)
+    }
 
 
 @app.post("/api/process")
@@ -470,7 +460,7 @@ async def process_turn(
     x_api_key: Optional[str] = Header(None),
     api_key: Optional[str] = Form(None),
 ):
-    """Process audio turn with RAG support."""
+    """Process audio turn with Smart RAG support."""
     audio_bytes = await audio.read()
     if not audio_bytes:
         raise HTTPException(status_code=400, detail="Empty audio payload")
@@ -497,19 +487,27 @@ async def process_turn(
 
     with state.lock:
         state.memory.add_user(user_text)
-        
-        # Build prompt with RAG if available
-        messages = state.memory.build_prompt_with_rag(user_text, lang)
-        
-        # Generate response
-        assistant_text = state.memory.llm.complete(messages)
+
+        # Check if RAG can provide direct answer
+        direct_answer = state.memory.get_direct_rag_answer(user_text, lang)
+
+        if direct_answer:
+            # Use direct RAG answer without LLM
+            assistant_text = direct_answer
+            state.rag_hits += 1
+            rag_used = True
+        else:
+            # Build prompt with RAG context and use LLM
+            messages = state.memory.build_prompt(user_text, lang)
+            assistant_text = state.memory.llm.complete(messages)
+            rag_used = bool(state.memory.last_rag_match)
+            if rag_used:
+                state.rag_hits += 1
+
         state.memory.add_assistant(assistant_text)
         state.memory.maybe_summarize()
         state.last_lang = lang or state.last_lang
         state.turns += 1
-        
-        # Check if RAG was used
-        rag_used = bool(state.memory.last_rag_sources)
 
     audio_b64 = None
     if eleven_client:
@@ -527,7 +525,8 @@ async def process_turn(
         "tts_audio_b64": audio_b64,
         "tts_sample_rate": TARGET_SR,
         "rag_used": rag_used,
-        "rag_sources": len(state.memory.last_rag_sources) if rag_used else 0
+        "rag_topic": state.memory.last_rag_match.topic if state.memory.last_rag_match else None,
+        "rag_confidence": state.memory.last_rag_match.confidence if state.memory.last_rag_match else 0.0,
     }
 
 
@@ -535,15 +534,20 @@ if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
-    print(f"🏦 Starting Banking Voice Agent Server")
+    print(f"\n{'='*60}")
+    print(f"🤖 Bilingual Voice Agent Server with Smart RAG")
+    print(f"{'='*60}")
     print(f"├─ LLM provider: {LLM_PROVIDER}")
     print(f"├─ Model: {LLM_MODEL}")
-    print(f"└─ RAG: {'Enabled ✓' if rag_assistant else 'Disabled ✗'}")
-    
-    if rag_assistant:
-        stats = rag_assistant.get_statistics()
-        print(f"\n📚 Knowledge Base:")
-        print(f"├─ Documents: {stats['total_documents']}")
-        print(f"└─ Categories: {list(stats['categories'].keys())}")
-    
+    print(f"├─ RAG: {'Enabled ✓' if smart_rag else 'Disabled ✗'}")
+
+    if smart_rag:
+        stats = smart_rag.get_stats()
+        print(f"├─ Knowledge topics: {stats['total_topics']}")
+        print(f"└─ Topics: {', '.join(stats['topics'][:5])}...")
+    else:
+        print(f"└─ Port: {port}")
+
+    print(f"{'='*60}\n")
+
     uvicorn.run(app, host="0.0.0.0", port=port)

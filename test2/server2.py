@@ -12,6 +12,8 @@ import io
 import os
 import threading
 import uuid
+import shutil
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -72,69 +74,77 @@ app.add_middleware(
 # =========================
 
 
+def find_model_files(base_dir: str) -> Optional[str]:
+    """
+    Recursively search for model.bin in downloaded directory.
+    HuggingFace sometimes nests files in subdirectories.
+    Returns the directory containing model.bin, or None.
+    """
+    base_path = Path(base_dir)
+    
+    # Search for model.bin recursively
+    for model_bin in base_path.rglob("model.bin"):
+        model_dir = model_bin.parent
+        print(f"   ✓ Found model.bin in: {model_dir}")
+        
+        # Check if it's a valid size
+        size_mb = model_bin.stat().st_size / (1024 * 1024)
+        print(f"   ✓ model.bin size: {size_mb:.1f} MB")
+        
+        if size_mb < 10:
+            print(f"   ⚠️  Warning: model.bin is only {size_mb:.2f} MB")
+            continue
+        
+        return str(model_dir)
+    
+    return None
+
+
 def download_hf_model_with_lfs(repo_id: str, local_dir: str = "/tmp/whisper_model") -> str:
     """
     Download HuggingFace model ensuring LFS files are properly downloaded.
-    Returns the local path to the model.
+    Returns the local path to the model directory containing model.bin.
     """
-    from huggingface_hub import hf_hub_download, list_repo_files
+    from huggingface_hub import snapshot_download
     
     print(f"📦 Downloading model from HuggingFace: {repo_id}")
     
-    # Create local directory
-    os.makedirs(local_dir, exist_ok=True)
-    
     try:
-        # Get list of all files in the repo
-        all_files = list_repo_files(repo_id)
-        print(f"   Found {len(all_files)} files in repository")
+        # Use snapshot_download which handles nested directories properly
+        downloaded_path = snapshot_download(
+            repo_id=repo_id,
+            cache_dir=os.path.dirname(local_dir),
+            local_dir=local_dir,
+            local_dir_use_symlinks=False,
+            resume_download=True,
+        )
         
-        # Download each file explicitly to force LFS download
-        for filename in all_files:
-            try:
-                print(f"   Downloading: {filename}...", end=" ")
-                
-                downloaded_path = hf_hub_download(
-                    repo_id=repo_id,
-                    filename=filename,
-                    local_dir=local_dir,
-                    local_dir_use_symlinks=False,  # Force actual copy, not symlink
-                    resume_download=True,
-                    force_download=False,  # Use cache if available
-                )
-                
-                # Check file size for binary files
-                if filename.endswith('.bin'):
-                    size_mb = os.path.getsize(downloaded_path) / (1024 * 1024)
-                    if size_mb < 1:  # Binary files should be at least 1MB
-                        print(f"⚠️  WARNING: {filename} is only {size_mb:.2f} MB (might be LFS pointer)")
-                    else:
-                        print(f"✓ ({size_mb:.1f} MB)")
-                else:
-                    print("✓")
-                    
-            except Exception as e:
-                print(f"⚠️  Error downloading {filename}: {e}")
+        print(f"   ✓ Download complete: {downloaded_path}")
         
-        # Verify model.bin exists and is large enough
-        model_bin_path = os.path.join(local_dir, "model.bin")
-        if os.path.exists(model_bin_path):
-            size_mb = os.path.getsize(model_bin_path) / (1024 * 1024)
-            print(f"\n✅ model.bin size: {size_mb:.1f} MB")
+        # Find where model.bin actually is
+        model_dir = find_model_files(downloaded_path)
+        
+        if not model_dir:
+            # List what we actually got
+            print(f"\n❌ model.bin not found. Directory contents:")
+            for root, dirs, files in os.walk(downloaded_path):
+                level = root.replace(downloaded_path, '').count(os.sep)
+                indent = ' ' * 2 * level
+                print(f"{indent}{os.path.basename(root)}/")
+                subindent = ' ' * 2 * (level + 1)
+                for file in files:
+                    file_path = os.path.join(root, file)
+                    size = os.path.getsize(file_path)
+                    print(f"{subindent}{file} ({size} bytes)")
             
-            if size_mb < 10:  # CT2 models should be at least 10MB
-                raise RuntimeError(
-                    f"❌ model.bin is only {size_mb:.2f} MB - LFS files not properly downloaded!\n"
-                    "This usually means:\n"
-                    "1. The HuggingFace repo doesn't have LFS properly configured\n"
-                    "2. You need to use 'git lfs' to upload the model\n"
-                    "3. Try downloading the model manually and pointing to local path"
-                )
-        else:
-            raise RuntimeError(f"❌ model.bin not found in {local_dir}")
+            raise RuntimeError(
+                f"❌ model.bin not found in {downloaded_path}\n"
+                "The HuggingFace repository might not contain a valid CTranslate2 model.\n"
+                "Please verify the model format on HuggingFace."
+            )
         
-        print(f"✅ Model ready at: {local_dir}\n")
-        return local_dir
+        print(f"✅ Model ready at: {model_dir}\n")
+        return model_dir
         
     except Exception as e:
         print(f"\n❌ Failed to download model: {e}")
@@ -146,9 +156,19 @@ def load_whisper():
     
     # Check if WHISPER_MODEL is a local path or HF repo
     if os.path.exists(WHISPER_MODEL):
-        # Local path
+        # Local path - check if model.bin is directly there or in subdirectory
         model_path = WHISPER_MODEL
-        print(f"📂 Using local model: {model_path}")
+        print(f"📂 Using local model path: {model_path}")
+        
+        # Check if we need to search for model.bin in subdirectories
+        if not os.path.exists(os.path.join(model_path, "model.bin")):
+            print(f"   model.bin not in root, searching subdirectories...")
+            found_path = find_model_files(model_path)
+            if found_path:
+                model_path = found_path
+            else:
+                raise RuntimeError(f"model.bin not found in {model_path} or subdirectories")
+        
     elif "/" in WHISPER_MODEL:
         # HuggingFace repo (format: username/repo-name)
         print(f"🌐 Model is HuggingFace repository: {WHISPER_MODEL}")
@@ -156,27 +176,30 @@ def load_whisper():
         # Use a persistent cache directory
         cache_base = os.path.expanduser("~/.cache/whisper_models")
         safe_name = WHISPER_MODEL.replace("/", "_")
-        model_path = os.path.join(cache_base, safe_name)
+        cache_dir = os.path.join(cache_base, safe_name)
         
         # Check if already downloaded and valid
-        model_bin = os.path.join(model_path, "model.bin")
-        if os.path.exists(model_bin):
-            size_mb = os.path.getsize(model_bin) / (1024 * 1024)
-            if size_mb > 10:
-                print(f"✅ Using cached model ({size_mb:.1f} MB): {model_path}")
+        if os.path.exists(cache_dir):
+            existing_model = find_model_files(cache_dir)
+            if existing_model:
+                model_bin = os.path.join(existing_model, "model.bin")
+                size_mb = os.path.getsize(model_bin) / (1024 * 1024)
+                print(f"✅ Using cached model ({size_mb:.1f} MB): {existing_model}")
+                model_path = existing_model
             else:
-                print(f"⚠️  Cached model.bin too small ({size_mb:.2f} MB), re-downloading...")
-                model_path = download_hf_model_with_lfs(WHISPER_MODEL, model_path)
+                print(f"⚠️  Cached model invalid, re-downloading...")
+                shutil.rmtree(cache_dir, ignore_errors=True)
+                model_path = download_hf_model_with_lfs(WHISPER_MODEL, cache_dir)
         else:
             # Download from HuggingFace
-            model_path = download_hf_model_with_lfs(WHISPER_MODEL, model_path)
+            model_path = download_hf_model_with_lfs(WHISPER_MODEL, cache_dir)
     else:
         # Assume it's a built-in model name
         model_path = WHISPER_MODEL
         print(f"🔧 Using built-in model identifier: {model_path}")
     
     # Load the model
-    print(f"🚀 Loading Whisper model...")
+    print(f"🚀 Loading Whisper model from: {model_path}")
     kwargs = dict(
         device=WHISPER_DEVICE,
         compute_type=WHISPER_COMPUTE,
@@ -192,7 +215,7 @@ def load_whisper():
         print(f"\nTroubleshooting:")
         print(f"1. Check if model files exist: ls -lh {model_path}")
         print(f"2. Verify model.bin size: du -h {model_path}/model.bin")
-        print(f"3. Try re-downloading by deleting: rm -rf {model_path}")
+        print(f"3. Try re-downloading by deleting: rm -rf {cache_base}/{safe_name if '/' in WHISPER_MODEL else ''}")
         raise
     
     # GPU warmup

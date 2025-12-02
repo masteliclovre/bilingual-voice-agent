@@ -72,6 +72,24 @@ app.add_middleware(
 # =========================
 
 
+def find_model_bin(base_dir: str) -> Optional[str]:
+    """Find model.bin in base_dir or subdirectories (max 2 levels deep)."""
+    # Check root
+    if os.path.exists(os.path.join(base_dir, "model.bin")):
+        return base_dir
+    
+    # Check one level deep
+    try:
+        for item in os.listdir(base_dir):
+            subdir = os.path.join(base_dir, item)
+            if os.path.isdir(subdir) and os.path.exists(os.path.join(subdir, "model.bin")):
+                return subdir
+    except:
+        pass
+    
+    return None
+
+
 def load_whisper():
     """Load Whisper model with automatic HuggingFace download support."""
     from huggingface_hub import snapshot_download
@@ -89,14 +107,15 @@ def load_whisper():
         cache_dir = os.path.join(cache_base, safe_name)
         
         # Check if already cached
-        model_bin = os.path.join(cache_dir, "model.bin")
-        if os.path.exists(model_bin):
-            size_mb = os.path.getsize(model_bin) / (1024 * 1024)
+        existing = find_model_bin(cache_dir) if os.path.exists(cache_dir) else None
+        
+        if existing:
+            size_mb = os.path.getsize(os.path.join(existing, "model.bin")) / (1024 * 1024)
             print(f"✅ Using cached model ({size_mb:.1f} MB)")
-            model_path = cache_dir
+            model_path = existing
         else:
             # Download from HuggingFace
-            model_path = snapshot_download(
+            downloaded = snapshot_download(
                 repo_id=WHISPER_MODEL,
                 cache_dir=os.path.dirname(cache_dir),
                 local_dir=cache_dir,
@@ -104,12 +123,14 @@ def load_whisper():
                 resume_download=True,
             )
             
-            # Verify download
-            if os.path.exists(os.path.join(model_path, "model.bin")):
-                size_mb = os.path.getsize(os.path.join(model_path, "model.bin")) / (1024 * 1024)
-                print(f"✅ Model downloaded ({size_mb:.1f} MB)")
-            else:
-                raise RuntimeError(f"❌ model.bin not found after download in {model_path}")
+            # Find model.bin in downloaded directory
+            model_path = find_model_bin(downloaded)
+            
+            if not model_path:
+                raise RuntimeError(f"❌ model.bin not found in {downloaded}")
+            
+            size_mb = os.path.getsize(os.path.join(model_path, "model.bin")) / (1024 * 1024)
+            print(f"✅ Model downloaded ({size_mb:.1f} MB)")
     else:
         model_path = WHISPER_MODEL
         print(f"🔧 Using model identifier: {model_path}")

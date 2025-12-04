@@ -12,6 +12,8 @@ import io
 import os
 import threading
 import uuid
+import asyncio
+import concurrent.futures
 from dataclasses import dataclass, field
 from typing import Dict, Optional
 
@@ -54,6 +56,9 @@ LLM_MAX_TOKENS = int(os.getenv("OPENAI_MAX_TOKENS", "150"))
 MAX_TURNS_IN_WINDOW = int(os.getenv("MAX_TURNS_IN_WINDOW", "8"))
 SUMMARY_UPDATE_EVERY = int(os.getenv("SUMMARY_UPDATE_EVERY", "8"))
 
+# Thread pool configuration
+MAX_CONCURRENT_REQUESTS = int(os.getenv("MAX_CONCURRENT_REQUESTS", "4"))
+
 TARGET_SR = 16000
 
 SERVER_AUTH_TOKEN = os.getenv("REMOTE_SERVER_AUTH_TOKEN", "").strip() or None
@@ -66,6 +71,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"]
 )
+
+# =========================
+# Thread Pool Executor
+# =========================
+
+# Thread pool for CPU-bound operations (LLM calls, TTS)
+cpu_executor = concurrent.futures.ThreadPoolExecutor(
+    max_workers=MAX_CONCURRENT_REQUESTS,
+    thread_name_prefix="cpu_worker"
+)
+
+print(f"🔧 Initialized thread pool with {MAX_CONCURRENT_REQUESTS} workers")
 
 # =========================
 # Utilities shared with voice_agent
@@ -83,13 +100,13 @@ def load_whisper():
     
     # GPU warmup
     if WHISPER_DEVICE == "cuda":
-        print("Warming up GPU...")
+        print("🔥 Warming up GPU...")
         dummy = np.zeros(16000, dtype=np.float32)
         try:
             list(model.transcribe(dummy, beam_size=1, vad_filter=False))
-            print("✓ GPU warmup complete")
+            print("✅ GPU warmup complete")
         except Exception as e:
-            print(f"Warmup warning: {e}")
+            print(f"⚠️  Warmup warning: {e}")
     
     return model
 
@@ -271,9 +288,26 @@ class SessionState:
     lock: threading.Lock = field(default_factory=threading.Lock)
 
 
+# =========================
+# Initialize models at startup
+# =========================
+
+print("\n" + "="*60)
+print("🚀 Initializing Bilingual Voice Agent Server")
+print("="*60)
+
 whisper_model = load_whisper()
 eleven_client = init_elevenlabs()
 sessions: Dict[str, SessionState] = {}
+
+print("="*60)
+print("✅ Server initialization complete")
+print("="*60 + "\n")
+
+
+# =========================
+# API Endpoints
+# =========================
 
 
 def require_auth(x_auth: Optional[str] = Header(None)):
@@ -297,7 +331,12 @@ def get_session(session_id: Optional[str], api_key_override: Optional[str]) -> t
 
 @app.get("/healthz")
 def healthz():
-    return {"status": "ok", "llm_provider": LLM_PROVIDER, "llm_model": LLM_MODEL}
+    return {
+        "status": "ok",
+        "llm_provider": LLM_PROVIDER,
+        "llm_model": LLM_MODEL,
+        "max_concurrent": MAX_CONCURRENT_REQUESTS
+    }
 
 
 @app.post("/api/session")
@@ -333,6 +372,8 @@ async def process_turn(
         raise HTTPException(status_code=500, detail=str(exc))
 
     wav_buf = io.BytesIO(audio_bytes)
+    
+    # GPU-bound operation (Whisper) - run synchronously
     user_text, lang = whisper_transcribe(whisper_model, wav_buf)
 
     if not user_text:
@@ -345,22 +386,38 @@ async def process_turn(
             "tts_sample_rate": TARGET_SR,
         }
 
-    with state.lock:
-        state.memory.add_user(user_text)
-        messages = state.memory.build_prompt(lang)
-        assistant_text = state.memory.llm.complete(messages)
-        state.memory.add_assistant(assistant_text)
-        state.memory.maybe_summarize()
-        state.last_lang = lang or state.last_lang
-        state.turns += 1
+    # CPU-bound operation (LLM) - run in thread pool
+    loop = asyncio.get_event_loop()
+    
+    def process_llm():
+        """CPU-intensive LLM processing in thread pool"""
+        with state.lock:
+            state.memory.add_user(user_text)
+            messages = state.memory.build_prompt(lang)
+            assistant_text = state.memory.llm.complete(messages)
+            state.memory.add_assistant(assistant_text)
+            state.memory.maybe_summarize()
+            state.last_lang = lang or state.last_lang
+            state.turns += 1
+            return assistant_text
+    
+    # Run LLM in thread pool
+    assistant_text = await loop.run_in_executor(cpu_executor, process_llm)
 
+    # CPU-bound operation (TTS) - run in thread pool if available
     audio_b64 = None
     if eleven_client:
-        try:
-            pcm_bytes = elevenlabs_tts_pcm(eleven_client, assistant_text)
-            audio_b64 = base64.b64encode(pcm_bytes).decode("ascii")
-        except Exception as exc:
-            print("TTS error:", exc)
+        def generate_tts():
+            """CPU-intensive TTS processing in thread pool"""
+            try:
+                pcm_bytes = elevenlabs_tts_pcm(eleven_client, assistant_text)
+                return base64.b64encode(pcm_bytes).decode("ascii")
+            except Exception as exc:
+                print(f"TTS error: {exc}")
+                return None
+        
+        # Run TTS in thread pool
+        audio_b64 = await loop.run_in_executor(cpu_executor, generate_tts)
 
     return {
         "session_id": session_id,
@@ -372,10 +429,19 @@ async def process_turn(
     }
 
 
+@app.on_event("shutdown")
+def shutdown_event():
+    """Cleanup thread pool on shutdown"""
+    print("🛑 Shutting down thread pool...")
+    cpu_executor.shutdown(wait=True)
+    print("✅ Thread pool shutdown complete")
+
+
 if __name__ == "__main__":
     import uvicorn
 
     port = int(os.getenv("PORT", "8000"))
     print(f"Starting server with LLM provider: {LLM_PROVIDER}")
     print(f"Using model: {LLM_MODEL}")
+    print(f"Max concurrent requests: {MAX_CONCURRENT_REQUESTS}")
     uvicorn.run(app, host="0.0.0.0", port=port)

@@ -1,11 +1,19 @@
 #!/usr/bin/env python
+# -*- coding: utf-8 -*-
 """
 Test script for Smart RAG system
 Tests matching, language detection, and knowledge retrieval
 """
 
+import sys
+import io
 from smart_rag import SmartRAG
 from colorama import init, Fore, Style
+
+# Fix Windows console encoding
+if sys.platform == "win32":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 init(autoreset=True)
 
@@ -18,19 +26,19 @@ def print_header(text: str):
 
 
 def print_success(text: str):
-    print(f"{Fore.GREEN}✓ {text}{Style.RESET_ALL}")
+    print(f"{Fore.GREEN}[OK] {text}{Style.RESET_ALL}")
 
 
 def print_info(text: str):
-    print(f"{Fore.BLUE}ℹ {text}{Style.RESET_ALL}")
+    print(f"{Fore.BLUE}[i] {text}{Style.RESET_ALL}")
 
 
 def print_warning(text: str):
-    print(f"{Fore.YELLOW}⚠ {text}{Style.RESET_ALL}")
+    print(f"{Fore.YELLOW}[!] {text}{Style.RESET_ALL}")
 
 
 def print_error(text: str):
-    print(f"{Fore.RED}✗ {text}{Style.RESET_ALL}")
+    print(f"{Fore.RED}[X] {text}{Style.RESET_ALL}")
 
 
 def test_initialization():
@@ -133,7 +141,7 @@ def test_matching(rag: SmartRAG):
             if match.topic == expected_topic:
                 response = match.response_hr if lang == "hr" else match.response_en
                 print_success(f"{query[:35]:35} → {match.topic:12} ({match.confidence:.2f})")
-                print(f"{' ' * 39}{Fore.GRAY}{response[:60]}...{Style.RESET_ALL}")
+                print(f"{' ' * 39}{Fore.LIGHTBLACK_EX}{response[:60]}...{Style.RESET_ALL}")
                 passed += 1
             else:
                 print_warning(f"{query[:35]:35} → {match.topic:12} (expected {expected_topic})")
@@ -163,7 +171,7 @@ def test_prompt_augmentation(rag: SmartRAG):
             lines = augmented.split('\n')
             for line in lines[:5]:
                 if line.strip():
-                    print(f"  {Fore.GRAY}{line[:70]}{Style.RESET_ALL}")
+                    print(f"  {Fore.LIGHTBLACK_EX}{line[:70]}{Style.RESET_ALL}")
         else:
             print_warning("No RAG match - will use LLM")
 

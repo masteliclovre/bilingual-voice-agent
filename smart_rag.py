@@ -19,6 +19,8 @@ class MatchResult:
     response_hr: Optional[str] = None
     response_en: Optional[str] = None
     context: Optional[str] = None
+    metadata: Optional[Dict] = None  # NEW: metadata support
+    score: float = 0.0  # NEW: raw matching score
 
 
 class SmartRAG:
@@ -195,16 +197,16 @@ class SmartRAG:
         try:
             with open(json_path, 'r', encoding='utf-8') as f:
                 self.knowledge_base = json.load(f)
-            print(f"✓ Loaded knowledge base: {len(self.knowledge_base)} topics")
+            print(f"[OK] Loaded knowledge base: {len(self.knowledge_base)} topics")
         except Exception as e:
-            print(f"⚠️ Failed to load knowledge base: {e}")
+            print(f"[WARNING] Failed to load knowledge base: {e}")
             self.knowledge_base = self._default_knowledge_base()
 
     def save_knowledge(self, json_path: str):
         """Save current knowledge base to JSON file."""
         with open(json_path, 'w', encoding='utf-8') as f:
             json.dump(self.knowledge_base, f, ensure_ascii=False, indent=2)
-        print(f"✓ Saved knowledge base to: {json_path}")
+        print(f"[OK] Saved knowledge base to: {json_path}")
 
     def detect_language(self, text: str) -> str:
         """
@@ -288,10 +290,73 @@ class SmartRAG:
                 confidence=min(best_score / 10.0, 1.0),
                 response_hr=responses.get("hr"),
                 response_en=responses.get("en"),
-                context=self._build_context(topic, data, lang)
+                context=self._build_context(topic, data, lang),
+                metadata=data.get("metadata", {}),
+                score=best_score
             )
 
         return MatchResult(matched=False)
+
+    def match_multiple(self, user_text: str, lang: Optional[str] = None, top_k: int = 3) -> List[MatchResult]:
+        """
+        Match user input against knowledge base and return top-K results.
+
+        Args:
+            user_text: User's message
+            lang: Language hint (hr/en), auto-detected if None
+            top_k: Number of top matches to return
+
+        Returns:
+            List of MatchResult objects sorted by confidence (best first)
+        """
+        if not user_text or not user_text.strip():
+            return []
+
+        # Detect language if not provided
+        if not lang:
+            lang = self.detect_language(user_text)
+
+        text_lower = user_text.lower()
+        all_matches = []
+
+        # Try each topic in knowledge base
+        for topic, data in self.knowledge_base.items():
+            score = 0.0
+
+            # Check regex patterns (high weight)
+            patterns = data.get("patterns", [])
+            for pattern in patterns:
+                if re.search(pattern, text_lower, re.IGNORECASE):
+                    score += 10.0
+
+            # Check keywords (medium weight)
+            keywords = data.get("keywords", [])
+            for keyword in keywords:
+                if keyword.lower() in text_lower:
+                    score += 3.0
+
+            # Apply priority multiplier
+            priority = data.get("priority", 5)
+            score *= (priority / 5.0)
+
+            # Store all matches above threshold
+            MATCH_THRESHOLD = 3.0
+            if score >= MATCH_THRESHOLD:
+                responses = data.get("responses", {})
+                all_matches.append(MatchResult(
+                    matched=True,
+                    topic=topic,
+                    confidence=min(score / 10.0, 1.0),
+                    response_hr=responses.get("hr"),
+                    response_en=responses.get("en"),
+                    context=self._build_context(topic, data, lang),
+                    metadata=data.get("metadata", {}),
+                    score=score
+                ))
+
+        # Sort by score descending and return top-K
+        all_matches.sort(key=lambda x: x.score, reverse=True)
+        return all_matches[:top_k]
 
     def _build_context(self, topic: str, data: Dict, lang: str) -> str:
         """Build context string for LLM prompt augmentation."""
@@ -363,15 +428,15 @@ Answer based on the given context. You can add extra details if needed, but stay
             },
             "priority": priority
         }
-        print(f"✓ Added topic: {topic}")
+        print(f"[OK] Added topic: {topic}")
 
     def remove_topic(self, topic: str):
         """Remove topic from knowledge base."""
         if topic in self.knowledge_base:
             del self.knowledge_base[topic]
-            print(f"✓ Removed topic: {topic}")
+            print(f"[OK] Removed topic: {topic}")
         else:
-            print(f"⚠️ Topic not found: {topic}")
+            print(f"[WARNING] Topic not found: {topic}")
 
     def list_topics(self) -> List[str]:
         """Get list of all topics in knowledge base."""

@@ -1,24 +1,49 @@
-# Core dependencies from original project
-python-dotenv>=1.0.0
-fastapi>=0.104.0
-uvicorn[standard]>=0.24.0
-requests>=2.31.0
+# ========================================
+# Core ML & Audio Processing
+# ========================================
+faster-whisper>=1.0.0
+torch
 numpy>=1.24.0
 scipy>=1.11.0
-sounddevice>=0.4.6
 
-# Speech processing
-faster-whisper>=1.0.0
+# ========================================
+# Audio I/O & Processing
+# ========================================
+sounddevice>=0.4.6
+pydub
+pygame
+pyttsx3
+
+# ========================================
+# Voice Activity Detection (VAD)
+# ========================================
+silero-vad
+webrtcvad-wheels ; sys_platform == "win32"
+
+# ========================================
+# LLM Providers
+# ========================================
 openai>=1.0.0
-elevenlabs>=0.2.0
 groq>=0.4.0
 
-# RAG and Vector Database dependencies
-chromadb>=0.4.22
-sentence-transformers>=2.2.2
-torch>=2.0.0  # Required for sentence-transformers
-transformers>=4.35.0
+# ========================================
+# Text-to-Speech
+# ========================================
+elevenlabs>=0.2.0
 
-# Additional utilities
+# ========================================
+# FastAPI Server
+# ========================================
+fastapi>=0.104.0
+uvicorn[standard]>=0.24.0
+python-multipart
+websockets
+
+# ========================================
+# Utilities
+# ========================================
+python-dotenv>=1.0.0
+requests>=2.31.0
 pydantic>=2.0.0
 pydantic-settings>=2.0.0
+hf_transfer

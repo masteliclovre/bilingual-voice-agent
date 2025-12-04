@@ -12,7 +12,7 @@ import os
 import threading
 import uuid
 from dataclasses import dataclass, field
-from typing import Dict, Optional
+from typing import Dict, Optional, List
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -241,32 +241,80 @@ class EnhancedMemory:
             print("Memory summarize error:", exc)
 
     def build_prompt(self, user_text: str, user_lang_hint: Optional[str]):
-        """Build prompt with Smart RAG integration."""
+        """Build prompt with Smart RAG integration (multi-document retrieval)."""
 
-        # Try RAG matching first
-        rag_matched = False
-        rag_response = None
+        # Try RAG matching with multi-document retrieval
+        rag_context = None
 
         if self.rag and user_text:
             try:
-                match = self.rag.match(user_text, user_lang_hint)
-                if match.matched:
-                    rag_matched = True
-                    self.last_rag_match = match
+                # Get top-3 matches instead of single match
+                matches = self.rag.match_multiple(user_text, user_lang_hint, top_k=3)
 
-                    # Get language-specific response
+                if matches:
+                    # Store best match for tracking
+                    self.last_rag_match = matches[0]
+
+                    # Detect language
                     lang = user_lang_hint or self.rag.detect_language(user_text)
-                    rag_response = match.response_hr if lang == "hr" else match.response_en
 
-                    # If RAG_DIRECT_ANSWER mode, return RAG response directly without LLM
-                    if RAG_DIRECT_ANSWER and rag_response:
-                        # Still build system prompt for consistency
+                    # If RAG_DIRECT_ANSWER mode, use best match directly
+                    if RAG_DIRECT_ANSWER:
+                        best_match = matches[0]
+                        rag_response = best_match.response_hr if lang == "hr" else best_match.response_en
                         return self._build_system_prompt(user_lang_hint, rag_context=rag_response)
+
+                    # Build structured context from multiple matches
+                    rag_context = self._build_structured_context(matches, lang)
             except Exception as e:
                 print(f"RAG matching error: {e}")
 
         # Build standard prompt (with or without RAG context)
-        return self._build_system_prompt(user_lang_hint, rag_context=rag_response)
+        return self._build_system_prompt(user_lang_hint, rag_context=rag_context)
+
+    def _build_structured_context(self, matches: List, lang: str) -> str:
+        """Build structured context from multiple RAG matches.
+
+        Args:
+            matches: List of MatchResult objects from match_multiple()
+            lang: Language code ('hr' or 'en')
+
+        Returns:
+            Formatted context string with metadata
+        """
+        if not matches:
+            return None
+
+        if lang == "hr":
+            context = "KONTEKST IZ BAZE ZNANJA:\n\n"
+            for i, match in enumerate(matches, 1):
+                context += f"[{i}] Tema: {match.topic} (pouzdanost: {match.confidence:.2f})\n"
+
+                # Add source if available
+                metadata = match.metadata or {}
+                source = metadata.get('source', 'N/A')
+                context += f"    Izvor: {source}\n"
+
+                # Add response content
+                context += f"    Sadržaj: {match.response_hr}\n\n"
+
+            context += "UPUTA: Koristi navedene izvore za odgovor. Ako korisnik pita o specifičnim detaljima (npr. 'Subota'), izvuci točan podatak iz konteksta."
+        else:
+            context = "CONTEXT FROM KNOWLEDGE BASE:\n\n"
+            for i, match in enumerate(matches, 1):
+                context += f"[{i}] Topic: {match.topic} (confidence: {match.confidence:.2f})\n"
+
+                # Add source if available
+                metadata = match.metadata or {}
+                source = metadata.get('source', 'N/A')
+                context += f"    Source: {source}\n"
+
+                # Add response content
+                context += f"    Content: {match.response_en}\n\n"
+
+            context += "INSTRUCTION: Use the provided sources for your answer. If the user asks about specific details (e.g., 'Saturday'), extract the exact information from the context."
+
+        return context
 
     def _build_system_prompt(self, user_lang_hint: Optional[str], rag_context: Optional[str] = None):
         """Build system prompt with optional RAG context."""

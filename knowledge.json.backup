@@ -9,21 +9,7 @@
       "hr": "Pozdrav! Ja sam vaš virtualni asistent. Kako vam mogu pomoći danas?",
       "en": "Hello! I'm your virtual assistant. How can I help you today?"
     },
-    "priority": 10,
-    "metadata": {
-      "source": "customer_support_faq_v1.0",
-      "category": "general/greeting",
-      "tags": ["greeting", "hello", "introduction"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.8,
-      "variants": [
-        "Hi there!",
-        "Good day!",
-        "Bok!",
-        "Dobar dan!",
-        "Zdravo!"
-      ]
-    }
+    "priority": 10
   },
 
   "hours": {
@@ -36,21 +22,7 @@
       "hr": "Naše radno vrijeme je: Ponedjeljak-Petak 8:00-20:00, Subota 9:00-14:00. Nedjelja zatvoreno.",
       "en": "Our working hours are: Monday-Friday 8:00-20:00, Saturday 9:00-14:00. Closed on Sunday."
     },
-    "priority": 8,
-    "metadata": {
-      "source": "company_policy_v2.0",
-      "category": "info/hours",
-      "tags": ["hours", "schedule", "opening", "time"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.7,
-      "variants": [
-        "What time do you open?",
-        "When are you open?",
-        "Kada radite?",
-        "U koliko sati otvarate?",
-        "Do kada ste otvoreni?"
-      ]
-    }
+    "priority": 8
   },
 
   "contact": {
@@ -63,21 +35,7 @@
       "hr": "Možete nas kontaktirati na: Telefon: 0800-1234 (besplatno), Email: info@company.com, ili posjetite naš ured na adresi Ulica 123, Zagreb.",
       "en": "You can contact us at: Phone: 0800-1234 (toll-free), Email: info@company.com, or visit our office at Street 123, Zagreb."
     },
-    "priority": 9,
-    "metadata": {
-      "source": "company_policy_v2.0",
-      "category": "info/contact",
-      "tags": ["contact", "phone", "email", "support", "reach"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.7,
-      "variants": [
-        "How can I reach you?",
-        "Contact information?",
-        "Kako vas mogu kontaktirati?",
-        "Vaš broj telefona?",
-        "Email adresa?"
-      ]
-    }
+    "priority": 9
   },
 
   "pricing": {
@@ -90,21 +48,7 @@
       "hr": "Naše cijene variraju ovisno o usluzi. Osnovni paket počinje od 99 kn mjesečno. Za detaljnu ponudu, molimo kontaktirajte naš tim.",
       "en": "Our prices vary depending on the service. Basic package starts at 99 kn per month. For a detailed quote, please contact our team."
     },
-    "priority": 7,
-    "metadata": {
-      "source": "pricing_guide_v3.1",
-      "category": "sales/pricing",
-      "tags": ["price", "cost", "fee", "pricing", "packages"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.6,
-      "variants": [
-        "How much does it cost?",
-        "What's the price?",
-        "Koliko to košta?",
-        "Koja je cijena?",
-        "Koliko moram platiti?"
-      ]
-    }
+    "priority": 7
   },
 
   "support": {
@@ -117,21 +61,7 @@
       "hr": "Žao mi je čuti da imate poteškoća. Naš tehnički tim je dostupan 24/7. Molim vas opišite svoj problem, ili nazovite naš support na 0800-5678.",
       "en": "I'm sorry to hear you're having trouble. Our technical team is available 24/7. Please describe your issue, or call our support at 0800-5678."
     },
-    "priority": 9,
-    "metadata": {
-      "source": "support_policy_v1.5",
-      "category": "support/technical",
-      "tags": ["help", "support", "problem", "troubleshooting", "issue"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.6,
-      "variants": [
-        "I need help",
-        "Something is not working",
-        "Imam problem",
-        "Ne radi mi",
-        "Trebam pomoć"
-      ]
-    }
+    "priority": 9
   },
 
   "shipping": {
@@ -144,21 +74,7 @@
       "hr": "Standardna dostava traje 2-3 radna dana. Brza dostava je dostupna uz nadoplatu (24h). Dobit ćete tracking broj putem email-a.",
       "en": "Standard delivery takes 2-3 business days. Express delivery available for extra fee (24h). You'll receive a tracking number via email."
     },
-    "priority": 7,
-    "metadata": {
-      "source": "shipping_policy_v2.2",
-      "category": "logistics/shipping",
-      "tags": ["shipping", "delivery", "tracking", "time", "express"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.6,
-      "variants": [
-        "When will my order arrive?",
-        "How long does shipping take?",
-        "Kada će stići?",
-        "Koliko traje dostava?",
-        "Imam li tracking broj?"
-      ]
-    }
+    "priority": 7
   },
 
   "returns": {
@@ -171,21 +87,7 @@
       "hr": "Nudimo povrat robe u roku od 14 dana. Proizvod mora biti neoštećen i u originalnom pakovanju. Puni povrat novca u roku od 5-7 dana.",
       "en": "We offer returns within 14 days. Product must be undamaged and in original packaging. Full refund within 5-7 days."
     },
-    "priority": 8,
-    "metadata": {
-      "source": "return_policy_v1.8",
-      "category": "sales/returns",
-      "tags": ["return", "refund", "cancel", "money back"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.7,
-      "variants": [
-        "Can I return this?",
-        "How do I get a refund?",
-        "Mogu li vratiti?",
-        "Kako dobiti novac natrag?",
-        "Politika povrata?"
-      ]
-    }
+    "priority": 8
   },
 
   "payment": {
@@ -198,21 +100,7 @@
       "hr": "Prihvaćamo: Kreditne/debitne kartice (Visa, Mastercard), PayPal, virman, i gotovina pri preuzimanju.",
       "en": "We accept: Credit/debit cards (Visa, Mastercard), PayPal, bank transfer, and cash on delivery."
     },
-    "priority": 7,
-    "metadata": {
-      "source": "payment_methods_v1.0",
-      "category": "sales/payment",
-      "tags": ["payment", "pay", "card", "paypal", "methods"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.6,
-      "variants": [
-        "How can I pay?",
-        "What payment methods?",
-        "Kako mogu platiti?",
-        "Koje načine plaćanja prihvaćate?",
-        "Mogu li platiti karticom?"
-      ]
-    }
+    "priority": 7
   },
 
   "location": {
@@ -225,21 +113,7 @@
       "hr": "Nalazimo se na adresi: Ulica 123, 10000 Zagreb. Blizu glavnog trga, pored pošte.",
       "en": "We're located at: Street 123, 10000 Zagreb. Near the main square, next to the post office."
     },
-    "priority": 7,
-    "metadata": {
-      "source": "company_info_v1.0",
-      "category": "info/location",
-      "tags": ["location", "address", "where", "office"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.7,
-      "variants": [
-        "Where are you located?",
-        "Your address?",
-        "Gdje ste?",
-        "Vaša adresa?",
-        "Kako do vas?"
-      ]
-    }
+    "priority": 7
   },
 
   "thanks": {
@@ -252,21 +126,7 @@
       "hr": "Nema na čemu! Rado pomažem. Imate li još neko pitanje?",
       "en": "You're welcome! Happy to help. Do you have any other questions?"
     },
-    "priority": 6,
-    "metadata": {
-      "source": "customer_support_faq_v1.0",
-      "category": "general/courtesy",
-      "tags": ["thanks", "gratitude", "appreciate"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.8,
-      "variants": [
-        "Thank you so much!",
-        "I appreciate it",
-        "Hvala puno!",
-        "Zahvaljujem!",
-        "Fala ti!"
-      ]
-    }
+    "priority": 6
   },
 
   "goodbye": {
@@ -279,20 +139,6 @@
       "hr": "Doviđenja! Lijepo mi je bilo razgovarati s vama. Obratite nam se opet!",
       "en": "Goodbye! It was nice talking to you. Feel free to reach out again!"
     },
-    "priority": 6,
-    "metadata": {
-      "source": "customer_support_faq_v1.0",
-      "category": "general/goodbye",
-      "tags": ["goodbye", "farewell", "bye"],
-      "last_updated": "2025-12-04",
-      "confidence_threshold": 0.8,
-      "variants": [
-        "Bye for now",
-        "See you later",
-        "Ćao",
-        "Vidimo se",
-        "Adio!"
-      ]
-    }
+    "priority": 6
   }
 }

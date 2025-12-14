@@ -2,24 +2,26 @@ import asyncio
 import json
 import logging
 import os
+from collections import deque
 
 import numpy as np
 import torch
 import websockets
-from transformers import pipeline
+from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 
 # --------------------------------------------------
 # CONFIG
 # --------------------------------------------------
 
-PORT = int(os.getenv("PORT", 8765))
-MODEL_ID = os.getenv(
-    "MODEL_ID",
-    "GoranS/whisper-large-v3-turbo-hr-parla",
-)
+PORT = int(os.getenv("PORT", "8765"))
+MODEL_ID = os.getenv("MODEL_ID", "GoranS/whisper-large-v3-turbo-hr-parla")
 
 DEFAULT_SAMPLE_RATE = 16000
 DEFAULT_CHANNELS = 2
+
+# Koliko audio-a skupimo prije transkripcije (sekunde)
+CHUNK_SECONDS = float(os.getenv("CHUNK_SECONDS", "1.2"))
+MIN_FLUSH_SECONDS = float(os.getenv("MIN_FLUSH_SECONDS", "0.6"))
 
 # --------------------------------------------------
 # LOGGING
@@ -36,41 +38,56 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------
 
 device = "cuda" if torch.cuda.is_available() else "cpu"
+dtype = torch.float16 if device == "cuda" else torch.float32
+
 logger.info(f"Using device: {device}")
 logger.info(f"Loading model: {MODEL_ID}")
 
-transcriber = pipeline(
-    "automatic-speech-recognition",
-    model=MODEL_ID,
-    device=0 if device == "cuda" else -1,
+processor = AutoProcessor.from_pretrained(MODEL_ID)
+model = AutoModelForSpeechSeq2Seq.from_pretrained(
+    MODEL_ID,
+    torch_dtype=dtype,
+    low_cpu_mem_usage=True,
 )
+model.to(device)
+model.eval()
 
-logger.info("Model loaded")
+logger.info("Model loaded (NO pipeline, NO torchcodec)")
 
 # --------------------------------------------------
-# TRANSCRIPTION FUNCTION
+# TRANSCRIPTION
 # --------------------------------------------------
 
-def transcribe_audio(audio: np.ndarray, sample_rate: int) -> str:
+def transcribe_audio_float32_mono(audio: np.ndarray, sample_rate: int) -> str:
     """
-    audio: float32 mono [-1, 1]
+    audio: float32 mono in [-1, 1]
     """
     if audio.size == 0:
         return ""
 
-    result = transcriber(
-        audio,
-        sampling_rate=sample_rate,
-        return_timestamps=False,
-    )
+    # Whisper expects 16kHz; Vapi obično šalje 16000.
+    if sample_rate != 16000:
+        logger.warning(f"Unexpected sample_rate={sample_rate}. Expected 16000.")
+        return ""
 
-    if isinstance(result, dict):
-        return result.get("text", "").strip()
+    inputs = processor(audio, sampling_rate=sample_rate, return_tensors="pt")
 
-    return ""
+    # neki procesori daju input_features, neki input_values; za Whisper je input_features
+    if hasattr(inputs, "input_features") and inputs.input_features is not None:
+        feats = inputs.input_features.to(device, dtype=dtype)
+        with torch.no_grad():
+            generated_ids = model.generate(feats, max_new_tokens=128)
+    else:
+        # fallback (rijetko)
+        vals = inputs.input_values.to(device, dtype=dtype)
+        with torch.no_grad():
+            generated_ids = model.generate(vals, max_new_tokens=128)
+
+    text = processor.batch_decode(generated_ids, skip_special_tokens=True)[0]
+    return (text or "").strip()
 
 # --------------------------------------------------
-# WEBSOCKET HANDLER (VAPI)
+# VAPI WS HANDLER
 # --------------------------------------------------
 
 async def handle_vapi_connection(websocket):
@@ -79,79 +96,106 @@ async def handle_vapi_connection(websocket):
     sample_rate = DEFAULT_SAMPLE_RATE
     channels = DEFAULT_CHANNELS
 
+    # Buffer za mono int16 sampleove
+    pcm_parts = deque()
+    buffered_samples = 0
+
+    target_samples = int(DEFAULT_SAMPLE_RATE * CHUNK_SECONDS)
+    min_flush_samples = int(DEFAULT_SAMPLE_RATE * MIN_FLUSH_SECONDS)
+
     try:
         async for message in websocket:
-
-            # ----------------------------
-            # START / CONTROL (JSON)
-            # ----------------------------
+            # ---- JSON control ----
             if isinstance(message, str):
                 try:
                     data = json.loads(message)
                 except Exception:
                     continue
 
-                msg_type = data.get("type")
-
-                if msg_type == "start":
+                if data.get("type") == "start":
                     sample_rate = int(data.get("sampleRate", sample_rate))
                     channels = int(data.get("channels", channels))
+
+                    target_samples = int(sample_rate * CHUNK_SECONDS)
+                    min_flush_samples = int(sample_rate * MIN_FLUSH_SECONDS)
+
                     logger.info(
                         f"START received | sample_rate={sample_rate} channels={channels}"
                     )
-
                 continue
 
-            # ----------------------------
-            # AUDIO (BINARY PCM16)
-            # ----------------------------
+            # ---- binary audio PCM16 ----
             if not isinstance(message, (bytes, bytearray)):
                 continue
 
-            logger.debug(f"AUDIO BYTES: {len(message)}")
-
             pcm = np.frombuffer(message, dtype=np.int16)
 
-            # Vapi šalje stereo interleaved: L,R,L,R...
+            # Stereo interleaved -> uzmi customer kanal (0)
             if channels == 2 and pcm.size >= 2:
-                pcm = pcm.reshape(-1, 2)[:, 0]  # customer channel
+                pcm = pcm.reshape(-1, 2)[:, 0]
 
-            audio = pcm.astype(np.float32) / 32768.0
+            pcm_parts.append(pcm)
+            buffered_samples += pcm.shape[0]
 
-            # Transcribe (off event loop)
-            text = await asyncio.to_thread(
-                transcribe_audio, audio, sample_rate
-            )
+            if buffered_samples >= target_samples:
+                chunk = np.concatenate(list(pcm_parts))
+                pcm_parts.clear()
+                buffered_samples = 0
 
-            if text:
-                logger.info(f"TRANSCRIPT: {text}")
+                audio = chunk.astype(np.float32) / 32768.0
 
-                await websocket.send(
-                    json.dumps(
-                        {
-                            "type": "transcriber-response",
-                            "transcription": text,
-                            "channel": "customer",
-                        }
-                    )
+                text = await asyncio.to_thread(
+                    transcribe_audio_float32_mono, audio, sample_rate
                 )
+
+                if text:
+                    logger.info(f"TRANSCRIPT: {text}")
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "transcriber-response",
+                                "transcription": text,
+                                "channel": "customer",
+                            }
+                        )
+                    )
 
     except websockets.exceptions.ConnectionClosed:
         logger.info("Vapi connection closed")
 
-    except Exception as e:
+    except Exception:
         logger.exception("Connection handler error")
+
+    finally:
+        # Flush ako je nešto ostalo
+        try:
+            if buffered_samples >= min_flush_samples:
+                chunk = np.concatenate(list(pcm_parts))
+                audio = chunk.astype(np.float32) / 32768.0
+                text = await asyncio.to_thread(
+                    transcribe_audio_float32_mono, audio, sample_rate
+                )
+                if text:
+                    await websocket.send(
+                        json.dumps(
+                            {
+                                "type": "transcriber-response",
+                                "transcription": text,
+                                "channel": "customer",
+                            }
+                        )
+                    )
+        except Exception:
+            pass
 
 # --------------------------------------------------
 # SERVER
 # --------------------------------------------------
 
 async def main():
-    logger.info(
-        f"Starting Custom Transcriber WebSocket server on port {PORT}"
-    )
+    logger.info(f"Starting Custom Transcriber WebSocket server on port {PORT}")
 
-    server = await websockets.serve(
+    await websockets.serve(
         handle_vapi_connection,
         "0.0.0.0",
         PORT,
@@ -161,12 +205,9 @@ async def main():
         ping_timeout=20,
     )
 
-    logger.info(
-        f"Server is listening on ws://0.0.0.0:{PORT}/api/custom-transcriber"
-    )
+    logger.info(f"Server listening on ws://0.0.0.0:{PORT}/api/custom-transcriber")
     logger.info("Waiting for connections from Vapi...")
-
-    await asyncio.Future()  # run forever
+    await asyncio.Future()
 
 if __name__ == "__main__":
     asyncio.run(main())

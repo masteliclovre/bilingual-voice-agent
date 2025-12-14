@@ -1,0 +1,12 @@
+websockets>=12.0
+python-dotenv>=1.0.0
+numpy>=1.24.0
+
+# ML
+transformers>=4.46.0
+accelerate>=0.20.0
+sentencepiece>=0.1.99
+safetensors>=0.4.0
+
+# Torch: for GPU containers, install the CUDA build (base image usually includes it).
+torch>=2.0.0

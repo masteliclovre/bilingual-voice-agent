@@ -323,11 +323,6 @@ pip install -r requirements.txt
 cp .env.template .env
 # Edit .env with test API keys
 ```
-
-## 📝 License
-
-[Add your license here]
-
 ## 🙏 Acknowledgments
 
 - [Faster-Whisper](https://github.com/guillaumekln/faster-whisper) for speech recognition

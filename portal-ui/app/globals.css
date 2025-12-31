@@ -1,0 +1,90 @@
+body {
+  margin: 0;
+  font-family: Arial, sans-serif;
+  background: #f7f7f8;
+  color: #111;
+}
+
+.layout {
+  display: flex;
+  min-height: 100vh;
+}
+
+.sidebar {
+  width: 220px;
+  background: #1d1f25;
+  color: #fff;
+  padding: 24px;
+}
+
+.sidebar nav {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  margin-top: 24px;
+}
+
+.sidebar a {
+  color: #cbd5f5;
+  text-decoration: none;
+  font-weight: 500;
+}
+
+.content {
+  flex: 1;
+  padding: 32px;
+}
+
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+}
+
+.card {
+  background: #fff;
+  padding: 16px;
+  border-radius: 12px;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background: #fff;
+  border-radius: 12px;
+  overflow: hidden;
+}
+
+.table th,
+.table td {
+  padding: 12px;
+  border-bottom: 1px solid #e2e8f0;
+  text-align: left;
+}
+
+.badge {
+  padding: 4px 8px;
+  border-radius: 999px;
+  font-size: 12px;
+}
+
+.badge.resolved {
+  background: #dcfce7;
+  color: #166534;
+}
+
+.badge.escalated {
+  background: #fef3c7;
+  color: #92400e;
+}
+
+.badge.failed {
+  background: #fee2e2;
+  color: #991b1b;
+}
+
+.badge.abandoned {
+  background: #e2e8f0;
+  color: #334155;
+}

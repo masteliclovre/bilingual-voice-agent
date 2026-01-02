@@ -15,7 +15,7 @@ from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor
 # ENV CONFIG (tune these)
 # --------------------------------------------------
 
-PORT = int(os.getenv("PORT", "8765"))
+PORT = int(os.getenv("PORT", "8000"))
 MODEL_ID = os.getenv("MODEL_ID", "GoranS/whisper-large-v3-turbo-hr-parla")
 
 DEFAULT_SAMPLE_RATE = 16000

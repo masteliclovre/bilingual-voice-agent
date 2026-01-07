@@ -18,11 +18,13 @@ from dataclasses import dataclass, field
 from typing import Dict, Optional
 
 from dotenv import load_dotenv
-from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Header
+from fastapi import Depends, FastAPI, File, Form, HTTPException, UploadFile, Header, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from faster_whisper import WhisperModel
 from openai import OpenAI
 from elevenlabs import ElevenLabs
+import json
+import wave
 
 load_dotenv()
 
@@ -427,6 +429,92 @@ async def process_turn(
         "tts_audio_b64": audio_b64,
         "tts_sample_rate": TARGET_SR,
     }
+
+
+@app.websocket("/api/custom-transcriber")
+async def custom_transcriber_websocket(websocket: WebSocket):
+    """
+    WebSocket endpoint for VAPI custom transcriber integration.
+    VAPI sends audio chunks, we transcribe with Whisper and return text.
+    """
+    await websocket.accept()
+    print("🔌 VAPI WebSocket connected")
+
+    audio_buffer = bytearray()
+    sample_rate = 16000  # VAPI uses 16kHz
+
+    try:
+        while True:
+            data = await websocket.receive()
+
+            # Handle text messages (control messages from VAPI)
+            if "text" in data:
+                msg = json.loads(data["text"])
+                msg_type = msg.get("type")
+
+                if msg_type == "config":
+                    # VAPI sends config at the start
+                    print(f"📋 VAPI config: {msg}")
+                    await websocket.send_text(json.dumps({"type": "config_ack"}))
+
+                elif msg_type == "stop":
+                    print("🛑 VAPI requested stop")
+                    break
+
+            # Handle binary audio data
+            elif "bytes" in data:
+                audio_chunk = data["bytes"]
+                audio_buffer.extend(audio_chunk)
+
+                # Process when we have enough audio (e.g., 1 second = 16000 samples * 2 bytes)
+                min_buffer_size = sample_rate * 2  # 1 second of 16-bit PCM
+
+                if len(audio_buffer) >= min_buffer_size:
+                    # Convert buffer to numpy array
+                    audio_np = np.frombuffer(bytes(audio_buffer), dtype=np.int16).astype(np.float32) / 32768.0
+
+                    # Transcribe with Whisper
+                    try:
+                        segments, info = whisper_model.transcribe(
+                            audio=audio_np,
+                            beam_size=1,
+                            vad_filter=True,
+                            temperature=0.0,
+                            language=None,
+                            condition_on_previous_text=False,
+                            word_timestamps=False,
+                            without_timestamps=True,
+                        )
+
+                        text = "".join(seg.text for seg in segments).strip()
+                        lang = getattr(info, "language", "en")
+
+                        if text:
+                            # Send transcription back to VAPI
+                            response = {
+                                "type": "transcript",
+                                "text": text,
+                                "language": lang,
+                                "isFinal": True
+                            }
+                            await websocket.send_text(json.dumps(response))
+                            print(f"🎤 Transcribed ({lang}): {text}")
+
+                    except Exception as e:
+                        print(f"❌ Transcription error: {e}")
+
+                    # Clear buffer after processing
+                    audio_buffer.clear()
+
+    except WebSocketDisconnect:
+        print("🔌 VAPI WebSocket disconnected")
+    except Exception as e:
+        print(f"❌ WebSocket error: {e}")
+    finally:
+        try:
+            await websocket.close()
+        except:
+            pass
 
 
 @app.on_event("shutdown")

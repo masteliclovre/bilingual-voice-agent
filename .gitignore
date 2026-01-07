@@ -1,0 +1,47 @@
+# Environment variables
+.env
+.env.local
+.env.production
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+ENV/
+env/
+
+# Node.js
+node_modules/
+.next/
+out/
+npm-debug.log*
+package-lock.json
+
+# Database
+*.db
+*.sqlite
+*.sql
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+*.log
+
+# Build outputs
+dist/
+build/
+
+# Test files (ne commitaj testne jsone sa API keyevima)
+call-test.json
+configure-vapi-webhook.json
+use-elevenlabs-transcriber.json

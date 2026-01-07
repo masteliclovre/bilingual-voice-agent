@@ -1,29 +1,16 @@
 import "./globals.css";
-import { UserProvider } from "@auth0/nextjs-auth0/client";
+import { AuthProvider } from "@/lib/auth";
 
 export const metadata = {
-  title: "Voice Agent Portal",
-  description: "Ops dashboard for Vapi-powered voice agents.",
+  title: "ENNA Next - Voice Agent Portal",
+  description: "Dashboard za Vapi glasovne agente.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
+    <html lang="hr">
       <body>
-        <UserProvider>
-          <div className="layout">
-            <aside className="sidebar">
-              <h2>Voice Portal</h2>
-              <nav>
-                <a href="/overview">Overview</a>
-                <a href="/outcomes">Outcomes</a>
-                <a href="/sla">SLA & Reliability</a>
-                <a href="/calls">Calls</a>
-              </nav>
-            </aside>
-            <main className="content">{children}</main>
-          </div>
-        </UserProvider>
+        <AuthProvider>{children}</AuthProvider>
       </body>
     </html>
   );

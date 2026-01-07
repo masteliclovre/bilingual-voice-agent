@@ -24,7 +24,7 @@ function buildRange() {
 
 export default async function CallsPage() {
   const { from, to } = buildRange();
-  const calls = await apiFetch<CallsResponse>(`/calls?from=${from}&to=${to}&page=1&pageSize=20`);
+  const calls = await apiFetch<CallsResponse>(`/api/calls?page=1&pageSize=20`);
 
   return (
     <div>

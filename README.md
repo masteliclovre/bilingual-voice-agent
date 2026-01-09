@@ -11,6 +11,7 @@ A bilingual (Croatian/English) voice assistant that captures audio from your mic
 
 ## 🎯 Features
 
+### Voice Agent
 - **Bilingual support** - Seamlessly handles Croatian and English
 - **Remote processing** - Heavy computation runs on GPU server
 - **Low latency** - Optimized for real-time conversation
@@ -18,42 +19,105 @@ A bilingual (Croatian/English) voice assistant that captures audio from your mic
 - **Memory system** - Maintains conversation context across turns
 - **Audio feedback** - Subtle beep indicates when waiting for response
 
+### Portal (NEW!)
+- **Multi-tenant architecture** - Support for multiple organizations
+- **Google OAuth authentication** - Secure sign-in with Google accounts
+- **Admin panel** - Manage users and permissions
+- **Call analytics** - View KPIs, call history, and performance metrics
+- **VAPI webhook integration** - Receive and store call data from VAPI
+- **Role-based access** - Admin, Manager, and Viewer roles
+
 ## 🏗️ Architecture
 
-The project is split into two components:
+The project consists of three main components:
 
-- **Client** (`voice_agent.py`) – Runs locally on your machine
+### 1. Voice Agent (Client + Server)
+- **Client** (`test2/voice_agent.py`) – Runs locally on your machine
   - Captures microphone input
   - Performs lightweight Voice Activity Detection (VAD)
   - Sends audio to remote server
   - Plays back synthesized responses
 
-- **Server** (`server.py`) – Runs on GPU host (RunPod, Lambda Labs, etc.)
+- **Server** (`test2/server.py`) – Runs on GPU host (RunPod, Lambda Labs, etc.)
   - Speech-to-Text using Faster-Whisper
   - Language detection and reasoning via Groq/OpenAI
   - Text-to-Speech synthesis via ElevenLabs
   - Session management and conversation memory
 
+### 2. Portal Backend (`portal-api/`)
+- **Flask API** with PostgreSQL database
+- Multi-tenant data isolation
+- User authentication and authorization
+- VAPI webhook endpoints
+- Admin management APIs
+
+### 3. Portal Frontend (`portal-ui/`)
+- **Next.js 14** with App Router
+- Google OAuth via NextAuth.js
+- Real-time dashboard with analytics
+- Admin panel for user management
+- Responsive design with Tailwind CSS
+
 ## 📁 Repository Layout
 
 ```text
 bilingual-voice-agent/
-├── README.md
-├── test2/
-|   ├── requirements.txt          # Python dependencies for both client and server
-│   ├── voice_agent.py            # Local client
-│   ├── server.py                 # Remote GPU server
-|   ├── .env.template             # Environment variable template
-│   └── .gitignore
-|
-└──models/
-    └──whisper-large-v3-turbo-hr-parla-ctranslate2
+├── README.md                     # This file
+├── SETUP_GUIDE.md               # Detailed portal setup guide
+├── QUICKSTART.md                # Quick start instructions
+├── DATABASE_SCHEMA.md           # Database schema documentation
+│
+├── test2/                       # Voice Agent (original)
+│   ├── requirements.txt
+│   ├── voice_agent.py           # Local client
+│   ├── server.py                # Remote GPU server
+│   └── .env.template
+│
+├── portal-api/                  # Backend API (Flask)
+│   ├── server_multitenant.py   # Main Flask app
+│   ├── requirements.txt
+│   ├── .env.example             # Environment template
+│   └── migrations/              # SQL migrations
+│       ├── 001_initial_schema.sql
+│       └── 002_add_user_approval.sql
+│
+├── portal-ui/                   # Frontend (Next.js)
+│   ├── app/                     # Next.js App Router
+│   │   ├── dashboard/           # Dashboard pages
+│   │   ├── api/auth/            # NextAuth endpoints
+│   │   └── page.tsx             # Landing page
+│   ├── components/              # React components
+│   │   ├── AdminSettings.tsx   # Admin panel
+│   │   └── Dashboard.tsx       # Main dashboard
+│   ├── lib/                     # Utilities
+│   │   ├── auth.tsx             # Auth hook
+│   │   └── api.ts               # API client
+│   ├── package.json
+│   └── .env.local.example       # Frontend environment template
+│
+└── models/                      # AI models
+    └── whisper-large-v3-turbo-hr-parla-ctranslate2/
 ```
 
 ## 🚀 Getting Started
 
-### Prerequisites
+Choose your setup path:
 
+### Portal Setup (Recommended for new users)
+**For the complete call management portal with admin panel:**
+
+See **[QUICKSTART.md](./QUICKSTART.md)** for quick setup or **[SETUP_GUIDE.md](./SETUP_GUIDE.md)** for detailed instructions.
+
+**Prerequisites:**
+- Python 3.10+
+- Node.js 18+
+- PostgreSQL 14+
+- ngrok (for webhook testing)
+
+### Voice Agent Setup (Original)
+**For direct voice interaction without portal:**
+
+Prerequisites:
 - Python 3.10+
 - Microphone and audio output
 

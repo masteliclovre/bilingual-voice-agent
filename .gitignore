@@ -23,7 +23,8 @@ package-lock.json
 # Database
 *.db
 *.sqlite
-*.sql
+# Ignore SQL dumps but keep migrations
+!portal-api/migrations/*.sql
 
 # IDE
 .vscode/

@@ -1,5 +1,6 @@
 import "./globals.css";
-import { AuthProvider } from "@/lib/auth";
+import { SessionProvider } from "@/lib/auth";
+import AuthSessionProvider from "@/components/AuthSessionProvider";
 
 export const metadata = {
   title: "ENNA Next - Voice Agent Portal",
@@ -10,7 +11,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="hr">
       <body>
-        <AuthProvider>{children}</AuthProvider>
+        <AuthSessionProvider>{children}</AuthSessionProvider>
       </body>
     </html>
   );

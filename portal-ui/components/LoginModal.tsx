@@ -9,35 +9,12 @@ interface LoginModalProps {
 }
 
 export default function LoginModal({ isOpen, onClose }: LoginModalProps) {
-  const { login, loginWithGoogle } = useAuth();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
-  const [isLoading, setIsLoading] = useState(false);
+  const { loginWithGoogle } = useAuth();
 
   if (!isOpen) return null;
 
-  const handleSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setError("");
-    setIsLoading(true);
-
-    const success = await login(email, password);
-
-    if (success) {
-      onClose();
-      setEmail("");
-      setPassword("");
-    } else {
-      setError("Neispravno korisničko ime ili lozinka");
-    }
-
-    setIsLoading(false);
-  };
-
   const handleGoogleLogin = () => {
-    // TODO: Implement Google OAuth
-    alert("Google OAuth će biti implementiran uskoro");
+    loginWithGoogle();
   };
 
   return (
@@ -49,51 +26,12 @@ export default function LoginModal({ isOpen, onClose }: LoginModalProps) {
 
         <h2>Prijava</h2>
         <p className="modal-subtitle">
-          Prijavite se u ENNA Next portal
+          Prijavite se u ENNA Next portal sa svojim Google računom
         </p>
-
-        <form onSubmit={handleSubmit} className="login-form">
-          {error && <div className="error-message">{error}</div>}
-
-          <div className="form-group">
-            <label htmlFor="email">Korisničko ime</label>
-            <input
-              id="email"
-              type="text"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="admin"
-              required
-              disabled={isLoading}
-            />
-          </div>
-
-          <div className="form-group">
-            <label htmlFor="password">Lozinka</label>
-            <input
-              id="password"
-              type="password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              required
-              disabled={isLoading}
-            />
-          </div>
-
-          <button type="submit" className="btn-primary" disabled={isLoading}>
-            {isLoading ? "Prijava..." : "Prijavi se"}
-          </button>
-        </form>
-
-        <div className="divider">
-          <span>ili</span>
-        </div>
 
         <button
           onClick={handleGoogleLogin}
           className="btn-google"
-          disabled={isLoading}
         >
           <svg width="18" height="18" viewBox="0 0 18 18">
             <path
@@ -117,7 +55,7 @@ export default function LoginModal({ isOpen, onClose }: LoginModalProps) {
         </button>
 
         <p className="login-hint">
-          Testni pristup: <strong>admin</strong> / <strong>admin</strong>
+          Samo ovlašteni korisnici mogu pristupiti portalu.
         </p>
       </div>
     </div>

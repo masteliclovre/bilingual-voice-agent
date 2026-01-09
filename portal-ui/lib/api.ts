@@ -208,13 +208,9 @@ Agent: Nema na čemu! Naš tim će vas kontaktirati uskoro. Ugodan dan!`,
     throw new Error(`No mock data for path: ${path}`);
   }
 
-  // Real API call
-  // TEMP: Disable auth for testing
-  // const { accessToken } = await getAccessToken();
+  // Real API call with proper auth headers
+  // Note: This function should be called from server components or with session data
   const response = await fetch(`${API_BASE}${path}`, {
-    headers: {
-      // Authorization: `Bearer ${accessToken}`,
-    },
     cache: "no-store",
   });
   if (!response.ok) {

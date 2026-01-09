@@ -3,29 +3,44 @@
 import { useEffect, useState } from "react";
 import { useAuth } from "@/lib/auth";
 import { useRouter } from "next/navigation";
+import PendingApproval from "@/components/PendingApproval";
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:5000";
 
 export default function DashboardPage() {
-  const { user, isAuthenticated, logout } = useAuth();
+  const { user, isAuthenticated, logout, currentTenant } = useAuth();
   const router = useRouter();
   const [activeCalls, setActiveCalls] = useState([]);
   const [completedCalls, setCompletedCalls] = useState([]);
   const [forwardedCalls, setForwardedCalls] = useState([]);
 
+  // Check if user is pending approval
+  const isPending = (user as any)?.approval_status === 'pending';
+
   useEffect(() => {
-    // TEMP: Disable auth check for testing
-    // if (!isAuthenticated) {
-    //   router.push("/");
-    //   return;
-    // }
+    if (!isAuthenticated) {
+      router.push("/");
+      return;
+    }
+
+    // If user is pending, don't fetch calls
+    if (isPending) {
+      return;
+    }
 
     const fetchCalls = async () => {
       try {
+        // TEMP: Use default tenant ID until Google Auth is fully working
+        const defaultTenantId = '00000000-0000-0000-0000-000000000001';
+
+        const headers = {
+          'X-Tenant-ID': defaultTenantId
+        };
+
         const [active, completed, forwarded] = await Promise.all([
-          fetch(`${API_URL}/api/calls/active`).then(r => r.json()),
-          fetch(`${API_URL}/api/calls/completed`).then(r => r.json()),
-          fetch(`${API_URL}/api/calls/forwarded`).then(r => r.json())
+          fetch(`${API_URL}/api/calls/active`, { headers }).then(r => r.json()),
+          fetch(`${API_URL}/api/calls/completed`, { headers }).then(r => r.json()),
+          fetch(`${API_URL}/api/calls/forwarded`, { headers }).then(r => r.json())
         ]);
         setActiveCalls(active);
         setCompletedCalls(completed);
@@ -38,12 +53,16 @@ export default function DashboardPage() {
     fetchCalls();
     const interval = setInterval(fetchCalls, 3000);
     return () => clearInterval(interval);
-  }, [isAuthenticated, router]);
+  }, [isAuthenticated, router, isPending]);
 
-  // TEMP: Disable auth check for testing
-  // if (!isAuthenticated) {
-  //   return null;
-  // }
+  // Show pending approval page if user is not approved yet
+  if (isPending) {
+    return <PendingApproval />;
+  }
+
+  if (!isAuthenticated) {
+    return null;
+  }
 
   return (
     <div className="layout">
@@ -53,11 +72,17 @@ export default function DashboardPage() {
           <a href="/dashboard">Dashboard</a>
           <a href="/dashboard/calls">Pozivi</a>
           <a href="/dashboard/outcomes">Ishodi</a>
+          {currentTenant?.role === 'admin' && (
+            <a href="/admin" className="admin-link">Admin Panel</a>
+          )}
         </nav>
         <div className="sidebar-footer">
           <div className="user-info">
             <div>{user?.name}</div>
             <div className="user-email">{user?.email}</div>
+            {currentTenant && (
+              <div className="user-role">{currentTenant.role}</div>
+            )}
           </div>
           <button onClick={logout} className="btn-logout">
             Odjava

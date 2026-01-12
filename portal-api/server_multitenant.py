@@ -12,7 +12,14 @@ import json
 load_dotenv()
 
 app = Flask(__name__)
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000"]}}, supports_credentials=True)
+
+# CORS configuration for development and production
+allowed_origins = [
+    "http://localhost:3000",
+    "https://*.railway.app",
+    "https://*.up.railway.app"
+]
+CORS(app, resources={r"/api/*": {"origins": allowed_origins}}, supports_credentials=True)
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)
